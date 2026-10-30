@@ -612,6 +612,9 @@ std::string user_data_dir() {
         if (dir.back() != '/' && dir.back() != '\\') dir += '/';
         return dir;
     }
+#if defined(__SWITCH__)
+    return "sdmc:/switch/gt3r/";
+#endif
 #if defined(SDL_PLATFORM_IOS)
     // iOS: the app's Documents, which the Files app and Finder show as GT3 Revisited
     // (UIFileSharingEnabled): mods and the disc image go in, screenshots and saves come out, as

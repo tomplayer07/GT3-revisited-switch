@@ -11,6 +11,9 @@ namespace gt3r::race_screen {
 // sphere map every frame; we render a cube): course only, 0.8 m above the player's car,
 // scenery within 200 m. [video] car_reflections = off falls back to the sky/scenery gradient.
 bool RaceScreen::update_env_cube() {
+#if defined(__SWITCH__)
+    return false;
+#endif
     if (!env_cube_on_ || !view_ || !course_scene_) return false;
     const sim::Vec3& p = render_state_.position;
     render::Vec3 pos{p.x, p.y + 0.8f, p.z};
@@ -518,6 +521,9 @@ float RaceScreen::sun_visibility(const render::Vec3& eye, float fovy, float rect
     if (!sp.enabled || !course_scene_ || course_scene_->occluder().empty()) return 1.0f;
     (void)rect_h;
     render::Vec3 d = sp.direction();
+#if defined(__SWITCH__)
+    return course_scene_->occluder().blocked(eye, d, 6000.0f) ? 0.0f : 1.0f;
+#else
     // Angular size of the box: N of 448 lines over the vertical field of view.
     float half = std::max(1.0f, sp.test_box) * 0.5f * fovy / 448.0f;
     render::Vec3 up{0, 1, 0};
@@ -530,6 +536,7 @@ float RaceScreen::sun_visibility(const render::Vec3& eye, float fovy, float rect
             open += course_scene_->occluder().blocked(eye, dir, 6000.0f) ? 0 : 1;
         }
     return float(open) / float(n);
+#endif
 }
 
 // `[race] split = auto|horizontal|vertical` (auto = vertical on our 16:9 screen, like GT3's
@@ -557,7 +564,11 @@ render::DrawOptions RaceScreen::draw_options() const {
     render::DrawOptions o;
     o.frustum_cull = true;
     o.sort_blended = true;
+#if defined(__SWITCH__)
+    o.draw_distance = 650;
+#else
     o.draw_distance = 2500;
+#endif
     o.fog = true;
     o.fog_start = 350;
     o.fog_end = 3000;

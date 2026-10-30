@@ -31,6 +31,7 @@ if(MSVC)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+  add_compile_definitions(_GNU_SOURCE)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,19 @@ endif()
 # Online play (src/net): Winsock on Windows.
 if(WIN32)
   target_link_libraries(gt3r_engine PUBLIC ws2_32)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  target_link_libraries(gt3r_engine PUBLIC
+    -Wl,--start-group
+    SDL3::SDL3
+    EGL
+    GLESv2
+    glapi
+    drm_nouveau
+    nx
+    m
+    -Wl,--end-group
+  )
 endif()
 
 # The game's version: project(... VERSION) above is the only source. gt3r_version.h
@@ -128,7 +142,26 @@ else()
     set_target_properties(gt3r PROPERTIES WIN32_EXECUTABLE TRUE)
   endif()
 endif()
-target_link_libraries(${GT3R_APP_TARGET} PRIVATE gt3r_engine)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  target_link_libraries(${GT3R_APP_TARGET} PRIVATE
+    -Wl,--start-group
+    gt3r_engine
+    SDL3::SDL3
+    EGL
+    GLESv2
+    glapi
+    drm_nouveau
+    nx
+    m
+    -Wl,--end-group
+  )
+  add_custom_command(TARGET ${GT3R_APP_TARGET} POST_BUILD
+    COMMAND elf2nro $<TARGET_FILE:${GT3R_APP_TARGET}> ${CMAKE_BINARY_DIR}/gt3r.nro
+    COMMENT "Building gt3r.nro"
+  )
+else()
+  target_link_libraries(${GT3R_APP_TARGET} PRIVATE gt3r_engine)
+endif()
 
 # UI font (Barlow, SIL OFL 1.1, third_party/fonts/barlow) compiled into the
 # executable, rasterised at runtime with stb_truetype (public domain).

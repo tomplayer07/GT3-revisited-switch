@@ -6,6 +6,10 @@
 #include "render/shaders/generated/model_vert.h"
 #include "scene/model.h"
 
+#if defined(__SWITCH__)
+#include "render/shaders/generated/model_gles3.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -18,10 +22,20 @@
 
 namespace gt3r::render {
 
-bool gpu_renderer_supported() { return GT3R_HAVE_GPU_RENDERER; }
+bool gpu_renderer_supported() {
+#if defined(__SWITCH__)
+    return true;
+#else
+    return GT3R_HAVE_GPU_RENDERER;
+#endif
+}
 
 std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, const GpuOptions& options) {
-#if GT3R_HAVE_GPU_RENDERER
+#if defined(__SWITCH__)
+    std::unique_ptr<GpuContext> ctx(new GpuContext());
+    if (!ctx->init(window, options)) return nullptr;
+    return ctx;
+#elif GT3R_HAVE_GPU_RENDERER
     std::unique_ptr<GpuContext> ctx(new GpuContext());
     if (!ctx->init(window, options)) return nullptr;
     return ctx;
@@ -35,7 +49,129 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, const GpuOpti
 }
 
 bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
-#if GT3R_HAVE_GPU_RENDERER
+#if defined(__SWITCH__)
+    renderer_ = SDL_CreateRenderer(window, nullptr);
+    if (!renderer_) {
+        LOG_ERROR("GpuContext: SDL_CreateRenderer failed: %s", SDL_GetError());
+        return false;
+    }
+    SDL_SetRenderVSync(renderer_, options.vsync ? 1 : 0);
+
+    // Compile GLES3 shaders
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    const char* vs_src = shaders::model_vert_gles3;
+    glShaderSource(vs, 1, &vs_src, nullptr);
+    glCompileShader(vs);
+    GLint status = 0;
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &status);
+    if (!status) {
+        char err[1024] = {};
+        glGetShaderInfoLog(vs, sizeof(err), nullptr, err);
+        LOG_ERROR("GLES3 vertex shader error: %s", err);
+        return false;
+    }
+
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fs_src = shaders::model_frag_gles3;
+    glShaderSource(fs, 1, &fs_src, nullptr);
+    glCompileShader(fs);
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &status);
+    if (!status) {
+        char err[1024] = {};
+        glGetShaderInfoLog(fs, sizeof(err), nullptr, err);
+        LOG_ERROR("GLES3 fragment shader error: %s", err);
+        return false;
+    }
+
+    gl_program_ = glCreateProgram();
+    glAttachShader(gl_program_, vs);
+    glAttachShader(gl_program_, fs);
+    glLinkProgram(gl_program_);
+    glGetProgramiv(gl_program_, GL_LINK_STATUS, &status);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!status) {
+        char err[1024] = {};
+        glGetProgramInfoLog(gl_program_, sizeof(err), nullptr, err);
+        LOG_ERROR("GLES3 program link error: %s", err);
+        return false;
+    }
+
+    // Set uniform block bindings
+    GLuint b0 = glGetUniformBlockIndex(gl_program_, "VertexUniforms");
+    GLuint b1 = glGetUniformBlockIndex(gl_program_, "VertexLighting");
+    GLuint b2 = glGetUniformBlockIndex(gl_program_, "FragmentUniforms");
+    LOG_INFO("GLES3 Program Uniform Blocks: VertexUniforms=%u, VertexLighting=%u, FragmentUniforms=%u", b0, b1, b2);
+    if (b0 != GL_INVALID_INDEX) glUniformBlockBinding(gl_program_, b0, 0);
+    if (b1 != GL_INVALID_INDEX) glUniformBlockBinding(gl_program_, b1, 1);
+    if (b2 != GL_INVALID_INDEX) glUniformBlockBinding(gl_program_, b2, 2);
+
+    // Set sampler uniform units
+    glUseProgram(gl_program_);
+    GLint loc_tex = glGetUniformLocation(gl_program_, "u_tex");
+    GLint loc_env = glGetUniformLocation(gl_program_, "u_env");
+    GLint loc_sph = glGetUniformLocation(gl_program_, "u_sphere");
+    LOG_INFO("GLES3 Sampler locations: u_tex=%d, u_env=%d, u_sphere=%d", loc_tex, loc_env, loc_sph);
+    if (loc_tex >= 0) glUniform1i(loc_tex, 0);
+    if (loc_env >= 0) glUniform1i(loc_env, 1);
+    if (loc_sph >= 0) glUniform1i(loc_sph, 2);
+    glUseProgram(0);
+
+    // Create UBOs
+    glGenBuffers(1, &gl_ubo_vert_);
+    glBindBuffer(GL_UNIFORM_BUFFER, gl_ubo_vert_);
+    glBufferData(GL_UNIFORM_BUFFER, 512, nullptr, GL_DYNAMIC_DRAW);
+
+    glGenBuffers(1, &gl_ubo_vert_lit_);
+    glBindBuffer(GL_UNIFORM_BUFFER, gl_ubo_vert_lit_);
+    glBufferData(GL_UNIFORM_BUFFER, 1024, nullptr, GL_DYNAMIC_DRAW);
+
+    glGenBuffers(1, &gl_ubo_frag_);
+    glBindBuffer(GL_UNIFORM_BUFFER, gl_ubo_frag_);
+    glBufferData(GL_UNIFORM_BUFFER, 2048, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    // Create Sampler objects
+    glGenSamplers(8, gl_samplers_);
+    for (int i = 0; i < 8; ++i) {
+        const bool no_mips = (i & 4) != 0;
+        glSamplerParameteri(gl_samplers_[i], GL_TEXTURE_MIN_FILTER, no_mips ? GL_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
+        glSamplerParameteri(gl_samplers_[i], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(gl_samplers_[i], GL_TEXTURE_WRAP_S, (i & 1) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+        glSamplerParameteri(gl_samplers_[i], GL_TEXTURE_WRAP_T, (i & 2) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+        glSamplerParameteri(gl_samplers_[i], GL_TEXTURE_WRAP_R, GL_REPEAT);
+    }
+
+    // 1x1 white texture
+    const u32 white = 0xFFFFFFFFu;
+    glGenTextures(1, &gl_white_);
+    glBindTexture(GL_TEXTURE_2D, gl_white_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    white_ = (SDL_GPUTexture*)(uintptr_t)gl_white_;
+
+    // 1x1 white dummy cubemap for u_env
+    glGenTextures(1, &gl_dummy_cube_);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, gl_dummy_cube_);
+    for (int f = 0; f < 6; ++f) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+    // Dedicated VAO for 3D rendering so SDL2D VAO is untouched
+    glGenVertexArrays(1, &gl_vao_);
+
+    set_render_scale(options.render_scale);
+    LOG_INFO("3D renderer: Native Switch OpenGL ES 3.0 initialized!");
+    return true;
+#elif GT3R_HAVE_GPU_RENDERER
     // Ask only for the optional Vulkan features the renderer uses. SDL requests clip distances,
     // depth clamping and first-instance indirect draws by default, and rejects every GPU without
     // them, e.g. Mali (Pixel, Galaxy, Tensor phones), which lacks shaderClipDistance. We clip
@@ -133,6 +269,17 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
 }
 
 GpuContext::~GpuContext() {
+#if defined(__SWITCH__)
+    if (gl_program_) { glDeleteProgram(gl_program_); gl_program_ = 0; }
+    if (gl_ubo_vert_) { glDeleteBuffers(1, &gl_ubo_vert_); gl_ubo_vert_ = 0; }
+    if (gl_ubo_vert_lit_) { glDeleteBuffers(1, &gl_ubo_vert_lit_); gl_ubo_vert_lit_ = 0; }
+    if (gl_ubo_frag_) { glDeleteBuffers(1, &gl_ubo_frag_); gl_ubo_frag_ = 0; }
+    if (gl_white_) { glDeleteTextures(1, &gl_white_); gl_white_ = 0; }
+    if (gl_dummy_cube_) { glDeleteTextures(1, &gl_dummy_cube_); gl_dummy_cube_ = 0; }
+    if (gl_vao_) { glDeleteVertexArrays(1, &gl_vao_); gl_vao_ = 0; }
+    glDeleteSamplers(8, gl_samplers_);
+    if (renderer_) { SDL_DestroyRenderer(renderer_); renderer_ = nullptr; }
+#else
     if (device_) {
         SDL_WaitForGPUIdle(device_);
         release_pipelines();
@@ -144,6 +291,7 @@ GpuContext::~GpuContext() {
     }
     if (renderer_) SDL_DestroyRenderer(renderer_); // releases the window claim
     if (device_) SDL_DestroyGPUDevice(device_);
+#endif
 }
 
 SDL_GPUShader* GpuContext::make_shader(bool vertex) {
@@ -233,10 +381,14 @@ bool GpuContext::msaa_supported(SDL_GPUSampleCount c) const {
 }
 
 std::vector<int> GpuContext::msaa_levels() const {
+#if defined(__SWITCH__)
+    return {1};
+#else
     std::vector<int> levels{1};
     for (SDL_GPUSampleCount c : {SDL_GPU_SAMPLECOUNT_2, SDL_GPU_SAMPLECOUNT_4, SDL_GPU_SAMPLECOUNT_8})
         if (msaa_supported(c)) levels.push_back(1 << int(c));
     return levels;
+#endif
 }
 
 void GpuContext::set_msaa(int samples) {
@@ -510,7 +662,12 @@ void GpuContext::release_texture(SDL_GPUTexture* t) {
         textures_by_key_.erase(it->second.key);
         shared_textures_.erase(it);
     }
+#if defined(__SWITCH__)
+    GLuint gl_tex = (GLuint)(uintptr_t)t;
+    if (gl_tex) glDeleteTextures(1, &gl_tex);
+#else
     SDL_ReleaseGPUTexture(device_, t);
+#endif
 }
 
 bool GpuContext::take_texture(SDL_GPUTexture* t) {
@@ -558,6 +715,15 @@ u32 Uploader::stage(const void* data, u32 size) {
 
 SDL_GPUBuffer* Uploader::buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size) {
     if (size == 0) return nullptr;
+#if defined(__SWITCH__)
+    GLuint b = 0;
+    glGenBuffers(1, &b);
+    GLenum target = (usage & SDL_GPU_BUFFERUSAGE_INDEX) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
+    glBindBuffer(target, b);
+    glBufferData(target, size, data, GL_STATIC_DRAW);
+    glBindBuffer(target, 0);
+    return (SDL_GPUBuffer*)(uintptr_t)b;
+#else
     SDL_GPUBufferCreateInfo bi{};
     bi.usage = usage;
     bi.size = size;
@@ -565,6 +731,7 @@ SDL_GPUBuffer* Uploader::buffer(SDL_GPUBufferUsageFlags usage, const void* data,
     if (!b) return nullptr;
     pending_.push_back({b, nullptr, stage(data, size), size, 0, 0, 0, false});
     return b;
+#endif
 }
 
 u32 mip_levels(u32 w, u32 h) {
@@ -595,6 +762,17 @@ std::vector<u32> half_size(const u32* rgba, u32 w, u32 h) {
 
 SDL_GPUTexture* Uploader::texture_rgba(u32 w, u32 h, const u32* rgba, bool mipmaps) {
     if (w == 0 || h == 0) return nullptr;
+#if defined(__SWITCH__)
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (mipmaps) {
+        glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return (SDL_GPUTexture*)(uintptr_t)tex;
+#else
     SDL_GPUTextureCreateInfo ti{};
     ti.type = SDL_GPU_TEXTURETYPE_2D;
     ti.format = GpuContext::kColorFormat;
@@ -608,9 +786,19 @@ SDL_GPUTexture* Uploader::texture_rgba(u32 w, u32 h, const u32* rgba, bool mipma
     note_gpu_submits(device_, 1); // Vulkan: a submit that sets the texture's layout
     update_rgba(tex, w, h, rgba, mipmaps, false);
     return tex;
+#endif
 }
 
 void Uploader::update_rgba(SDL_GPUTexture* tex, u32 w, u32 h, const u32* rgba, bool mipmaps, bool cycle) {
+#if defined(__SWITCH__)
+    GLuint gl_tex = (GLuint)(uintptr_t)tex;
+    glBindTexture(GL_TEXTURE_2D, gl_tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (mipmaps) {
+        glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+#else
     pending_.push_back({nullptr, tex, stage(rgba, w * h * 4), w * h * 4, w, h, 0, cycle});
     if (!mipmaps) return;
     std::vector<u32> level;
@@ -621,9 +809,13 @@ void Uploader::update_rgba(SDL_GPUTexture* tex, u32 w, u32 h, const u32* rgba, b
         pending_.push_back({nullptr, tex, stage(level.data(), w * h * 4), w * h * 4, w, h, i, false});
         above = level.data();
     }
+#endif
 }
 
 bool Uploader::submit() {
+#if defined(__SWITCH__)
+    return true;
+#else
     if (pending_.empty()) return true;
     SDL_GPUTransferBufferCreateInfo ti{};
     ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
@@ -665,6 +857,7 @@ bool Uploader::submit() {
     pending_.clear();
     staging_ = {};
     return ok;
+#endif
 }
 
 } // namespace gt3r::render

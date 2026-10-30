@@ -13,7 +13,9 @@
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#if !defined(__SWITCH__)
 #include <ifaddrs.h>
+#endif
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -287,7 +289,9 @@ bool UdpSocket::wait_readable(int timeout_ms) const {
 
 std::vector<std::string> local_addresses() {
     std::vector<std::string> out;
-#if !defined(_WIN32)
+#if defined(__SWITCH__)
+    return out;
+#elif !defined(_WIN32)
     ifaddrs* list = nullptr;
     if (getifaddrs(&list) != 0) return out;
     for (ifaddrs* i = list; i; i = i->ifa_next) {

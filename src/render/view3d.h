@@ -321,6 +321,19 @@ private:
         std::string path;
         std::vector<SDL_GPUTexture*> frames;
     } capture_;
+#if defined(__SWITCH__)
+    GLuint fbo_ = 0;
+    GLuint color_tex_ = 0;
+    GLuint depth_rb_ = 0;
+    struct OffscreenGL {
+        GLuint fbo = 0;
+        GLuint color = 0;
+        GLuint depth = 0;
+        int w = 0, h = 0;
+    } offscreen_gl_[4];
+    void encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
+                      const std::vector<DrawItem>& items, const DrawOptions& opt);
+#endif
 };
 
 } // namespace gt3r::render

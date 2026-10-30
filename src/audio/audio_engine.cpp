@@ -3,6 +3,8 @@
 #include "base/log.h"
 #include "vfs/vfs.h"
 
+#include <SDL3/SDL_hints.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
@@ -30,6 +32,9 @@ SDL_AudioDeviceID find_playback_device(const std::string& name) {
 
 // Opens a device for each stream on physical device `phys`; false (none left open) if either fails.
 bool open_pair(SDL_AudioDeviceID phys, SDL_AudioDeviceID& music, SDL_AudioDeviceID& voices) {
+#if defined(__SWITCH__)
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "2048");
+#endif
     music = SDL_OpenAudioDevice(phys, &kMusicSpec);
     voices = music ? SDL_OpenAudioDevice(phys, &kVoiceSpec) : 0;
     if (voices) return true;
@@ -231,6 +236,9 @@ void SDLCALL AudioEngine::feed_voices(void* user, SDL_AudioStream* stream, int a
     // Render in small blocks so parameter changes land with low latency.
     size_t frames = size_t(additional) / 4;
     if (frames == 0) frames = 1;
+#if defined(__SWITCH__)
+    if (frames < 512) frames = 512;
+#endif
     std::vector<s16> buf(frames * 2);
     self->voices_.mix(buf.data(), frames);
     SDL_PutAudioStreamData(stream, buf.data(), int(buf.size() * sizeof(s16)));
@@ -243,6 +251,7 @@ bool AudioEngine::play_music(Vfs& vfs, const std::string& path, bool loop, float
     std::shared_ptr<Bytes> data;
     try {
         std::string src = vfs.source_of(path);
+#if !defined(__SWITCH__)
         const Volume::Entry* e = vfs.base() ? vfs.base()->find(path) : nullptr;
         if (src == "disc" && e && !e->compressed) {
             // Stream directly from the disc image; no need to load ~10 MB.
@@ -253,7 +262,9 @@ bool AudioEngine::play_music(Vfs& vfs, const std::string& path, bool loop, float
             Volume::Entry entry = *e;
             stream = std::make_unique<AdsStream>(
                 h, [vol, entry](u64 off, void* out, size_t len) { vol->read_range(entry, off, out, len); }, loop);
-        } else {
+        } else
+#endif
+        {
             auto bytes = vfs.read(path);
             if (!bytes) return false;
             data = std::make_shared<Bytes>(std::move(*bytes));

@@ -87,6 +87,18 @@ bool ensure_buffer(SDL_GPUDevice* device, SDL_GPUBufferUsageFlags usage, SDL_GPU
                    u32 size, bool& ok) {
     ok = true;
     if (buffer && capacity >= size) return false;
+#if defined(__SWITCH__)
+    GLuint buf = (GLuint)(uintptr_t)buffer;
+    if (buf) glDeleteBuffers(1, &buf);
+    glGenBuffers(1, &buf);
+    GLenum target = (usage & SDL_GPU_BUFFERUSAGE_INDEX) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
+    glBindBuffer(target, buf);
+    glBufferData(target, std::max(size, capacity * 2), nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(target, 0);
+    buffer = (SDL_GPUBuffer*)(uintptr_t)buf;
+    capacity = std::max(size, capacity * 2);
+    return true;
+#else
     if (buffer) SDL_ReleaseGPUBuffer(device, buffer);
     SDL_GPUBufferCreateInfo bi{};
     bi.usage = usage;
@@ -95,6 +107,7 @@ bool ensure_buffer(SDL_GPUDevice* device, SDL_GPUBufferUsageFlags usage, SDL_GPU
     capacity = buffer ? bi.size : 0;
     ok = buffer != nullptr;
     return true;
+#endif
 }
 
 } // namespace
@@ -127,6 +140,16 @@ GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model) : ctx_(&ctx), dev
 // Each upload goes through staging_ (grown when too small), at 16-byte aligned offsets, into its
 // buffer from offset 0 with cycling: frames still drawing keep the old contents.
 bool GpuModel::stage(const Upload* uploads, int count) {
+#if defined(__SWITCH__)
+    for (int i = 0; i < count; ++i) {
+        if (!uploads[i].size) continue;
+        GLuint buf = (GLuint)(uintptr_t)uploads[i].buffer;
+        glBindBuffer(GL_ARRAY_BUFFER, buf);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, uploads[i].size, uploads[i].data);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return true;
+#else
     auto aligned = [](u32 v) { return (v + 15u) & ~15u; };
     u32 total = 0;
     for (int i = 0; i < count; ++i) total += aligned(uploads[i].size);
@@ -158,6 +181,7 @@ bool GpuModel::stage(const Upload* uploads, int count) {
     if (!SDL_SubmitGPUCommandBuffer(cmd)) return false;
     note_gpu_submits(device_, 1); // staging_ is this model's own: no new transfer buffer
     return true;
+#endif
 }
 
 bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
@@ -212,9 +236,16 @@ bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
 }
 
 GpuModel::~GpuModel() {
+#if defined(__SWITCH__)
+    GLuint v = (GLuint)(uintptr_t)vertices_;
+    if (v) glDeleteBuffers(1, &v);
+    GLuint i = (GLuint)(uintptr_t)indices_;
+    if (i) glDeleteBuffers(1, &i);
+#else
     if (staging_) SDL_ReleaseGPUTransferBuffer(device_, staging_);
     if (vertices_) SDL_ReleaseGPUBuffer(device_, vertices_);
     if (indices_) SDL_ReleaseGPUBuffer(device_, indices_);
+#endif
     for (TextureInfo& t : textures_) ctx_->release_texture(t.texture);
 }
 

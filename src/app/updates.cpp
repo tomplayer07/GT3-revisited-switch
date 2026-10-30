@@ -37,7 +37,12 @@ Updates& updates() {
 }
 
 bool Updates::enabled(App& app) const {
+#if defined(__SWITCH__)
+    (void)app;
+    return false;
+#else
     return to_lower(app.config().get("online", "update_check").value_or("on")) != "off";
+#endif
 }
 
 void Updates::set_enabled(App& app, bool on) {

@@ -19,6 +19,11 @@
 
 #include <SDL3/SDL.h>
 
+#if defined(__SWITCH__)
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+#endif
+
 #include <atomic>
 #include <map>
 #include <memory>
@@ -86,7 +91,20 @@ public:
     bool xr() const { return xr_; }
     const xr::Session::DeviceRequest& xr_request() const { return xr_request_; }
 #endif
+#if defined(__SWITCH__)
+    const char* driver_name() const { return "OpenGL ES 3.2 (Mesa Nouveau)"; }
+    GLuint gl_program() const { return gl_program_; }
+    GLuint gl_ubo_vert() const { return gl_ubo_vert_; }
+    GLuint gl_ubo_vert_lit() const { return gl_ubo_vert_lit_; }
+    GLuint gl_ubo_frag() const { return gl_ubo_frag_; }
+    GLint gl_ubo_align() const { return gl_ubo_align_; }
+    GLuint gl_sampler(int idx) const { return gl_samplers_[idx & 7]; }
+    GLuint gl_white() const { return gl_white_; }
+    GLuint gl_dummy_cube() const { return gl_dummy_cube_; }
+    GLuint gl_vao() const { return gl_vao_; }
+#else
     const char* driver_name() const { return SDL_GetGPUDeviceDriver(device_); }
+#endif
 
     // Offscreen 3D formats.
     static constexpr SDL_GPUTextureFormat kColorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -151,6 +169,17 @@ private:
     void release_pipelines();
 
     SDL_GPUDevice* device_ = nullptr;
+#if defined(__SWITCH__)
+    GLuint gl_program_ = 0;
+    GLuint gl_ubo_vert_ = 0;
+    GLuint gl_ubo_vert_lit_ = 0;
+    GLuint gl_ubo_frag_ = 0;
+    GLuint gl_samplers_[8] = {};
+    GLuint gl_white_ = 0;
+    GLuint gl_dummy_cube_ = 0;
+    GLuint gl_vao_ = 0;
+    GLint gl_ubo_align_ = 256;
+#endif
     bool anisotropy_ = true; // the device was created with anisotropic filtering
     int aniso_level_ = 4;    // the samplers' anisotropy (when anisotropy_)
 #if GT3R_XR

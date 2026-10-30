@@ -35,6 +35,9 @@ const SDL_DialogFileFilter kDiscFilters[] = {
 // Android's content:// are kept as they are.
 std::string absolute_disc_path(const std::string& path) {
     if (path.empty() || path.find("://") != std::string::npos) return path;
+#if defined(__SWITCH__)
+    if (path.rfind("sdmc:/", 0) == 0) return path;
+#endif
     std::error_code ec;
     std::filesystem::path p(std::u8string(path.begin(), path.end())); // UTF-8 on every platform
     if (p.is_absolute()) return path;
@@ -62,7 +65,11 @@ bool App::init(int argc, char** argv) {
     // Silent switch, and other apps' music paused while the game plays. SDL's own default there
     // (Playback, mixed with others) played on with the switch on silent.
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "AVAudioSessionCategorySoloAmbient");
+#if defined(__SWITCH__)
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
+#else
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR)) {
+#endif
         LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
         return false;
     }
@@ -87,8 +94,11 @@ bool App::init(int argc, char** argv) {
     // [video] fullscreen = on at start), leaving no way out but F11.
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_MENU_VISIBILITY, "1");
     SDL_WindowFlags win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_IOS)
+#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_IOS) || defined(__SWITCH__)
     win_flags |= SDL_WINDOW_FULLSCREEN; // immersive: hide system bars
+#endif
+#if defined(__SWITCH__)
+    win_flags |= SDL_WINDOW_OPENGL;
 #endif
 #if !defined(SDL_PLATFORM_ANDROID) && !defined(SDL_PLATFORM_IOS)
     // [video] fullscreen = on | off (desktop; F11 and the Settings screen change it)
@@ -100,7 +110,11 @@ bool App::init(int argc, char** argv) {
         phone_sim_ = true;
         win_flags &= ~SDL_WINDOW_FULLSCREEN;
     }
+#if defined(__SWITCH__)
+    touch_ui_ = false;
+#else
     touch_ui_ = platform::is_mobile() || phone_sim_;
+#endif
     window_ = SDL_CreateWindow("GT3 Revisited", phone_sim_ ? 1170 : 1280, phone_sim_ ? 540 : 720, win_flags);
     if (!window_) {
         LOG_ERROR("Window creation failed: %s", SDL_GetError());
@@ -215,22 +229,41 @@ bool App::init(int argc, char** argv) {
     }
     if (!disc_path.empty()) last_error_ = open_disc(disc_path);
     else open_saved_disc(config_.get("game", "disc").value_or(""));
+#if defined(__SWITCH__)
+    if (!disc_) {
+        const char* default_switch_paths[] = {
+            "sdmc:/switch/gt3r/gt3.iso",
+            "sdmc:/switch/gt3r/GT3.iso",
+            "sdmc:/switch/gt3/gt3.iso",
+            "gt3.iso",
+            "GT3.iso",
+        };
+        for (const char* p : default_switch_paths) {
+            if (open_disc(p).empty() && disc_) break;
+        }
+    }
+#endif
+    printf("[App] Pushing initial screen (hub/setup)...\n"); fflush(stdout);
     push(disc_ ? make_hub_screen() : make_setup_screen());
     // Normal start is the game itself (opening movie, then the title menu);
     // the home menu sits underneath (backing out of the title menu shows it).
     // --hub or [app] start = hub opens Developer options instead.
     if (disc_ && hub && browse.empty() && screen.empty()) push(make_developer_screen());
-    else if (disc_ && browse.empty() && screen.empty()) push_game_start();
+    else if (disc_ && browse.empty() && screen.empty()) {
+        printf("[App] Pushing game start...\n"); fflush(stdout);
+        push_game_start();
+    }
     if (disc_ && !browse.empty()) push(make_browser_screen(browse));
     if (!screen.empty())
         for (const ScreenEntry& entry : screen_registry())
             if (screen == entry.id && (disc_ || !entry.needs_disc)) push(entry.factory());
-    // The update check (README "Online"; [online] update_check): in the background, never waited for.
-    // --shot runs use only the cached answer (no traffic to a live server) unless GT3R_UPDATE_CHECK=1.
+    printf("[App] Updates startup...\n"); fflush(stdout);
     const char* uc = SDL_getenv("GT3R_UPDATE_CHECK");
     updates().startup(*this, auto_shot_path_.empty() || (uc && *uc == '1'));
+    printf("[App] Resetting dynamic scale...\n"); fflush(stdout);
     reset_dynamic_scale();
     last_ticks_ = SDL_GetTicksNS();
+    printf("[App] App::init finished successfully!\n"); fflush(stdout);
     return true;
 }
 
@@ -333,16 +366,22 @@ std::string App::open_disc(const std::string& path) {
     const std::string full = absolute_disc_path(path);
     try {
         auto disc = Disc::open(full);
+        printf("[App] Disc opened successfully\n"); fflush(stdout);
         close_disc();
         disc_ = std::move(disc);
+        printf("[App] Initializing VFS...\n"); fflush(stdout);
         vfs_ = std::make_unique<Vfs>(&disc_->volume());
+        printf("[App] Scanning mods...\n"); fflush(stdout);
         vfs_->scan_mods(mods_dir(), &config_);
+        printf("[App] Applying language...\n"); fflush(stdout);
         apply_language();
         config_.set("game", "disc", full);
         platform::save_recent_discs(config_, platform::push_recent_disc(recent_discs(), full));
+        printf("[App] Saving config...\n"); fflush(stdout);
         save_config();
         last_error_.clear();
         failed_disc_path_.clear();
+        printf("[App] open_disc completed!\n"); fflush(stdout);
         return "";
     } catch (const std::exception& e) {
         LOG_ERROR("Could not open disc: %s", e.what());
@@ -530,6 +569,13 @@ void App::apply_screen_changes() {
 }
 
 SDL_AppResult App::iterate() {
+#if defined(__SWITCH__)
+    static int s_iter_count = 0;
+    if (s_iter_count++ < 10) {
+        printf("[App::iterate frame %d]\n", s_iter_count);
+        fflush(stdout);
+    }
+#endif
 #if GT3R_XR
     // A headset paces the frames: wait for its next one (nothing to draw while its session is
     // not running, e.g. the headset is off).

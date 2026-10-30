@@ -248,6 +248,11 @@ public:
     void update(App& app, double) override {
         if (!started_) {
             started_ = true;
+#if defined(__SWITCH__)
+            printf("[MovieScreen] Skipping opening video on Switch directly to title menu\n");
+            fflush(stdout);
+            return finish(app);
+#endif
             if (std::getenv("GT3R_SKIP_MOVIES")) return finish(app); // developer shortcut
             float volume = opt_.volume >= 0 ? opt_.volume : app.audio().music_volume();
             try {

@@ -137,16 +137,63 @@ void View3D::release_target() {
         if (*w) SDL_DestroyTexture(*w);
         *w = nullptr;
     }
+#if defined(__SWITCH__)
+    if (fbo_) { glDeleteFramebuffers(1, &fbo_); fbo_ = 0; }
+    if (color_tex_) { glDeleteTextures(1, &color_tex_); color_tex_ = 0; }
+    if (depth_rb_) { glDeleteRenderbuffers(1, &depth_rb_); depth_rb_ = 0; }
+    for (int i = 0; i < 4; ++i) {
+        if (offscreen_gl_[i].fbo) { glDeleteFramebuffers(1, &offscreen_gl_[i].fbo); offscreen_gl_[i].fbo = 0; }
+        if (offscreen_gl_[i].color) { glDeleteTextures(1, &offscreen_gl_[i].color); offscreen_gl_[i].color = 0; }
+        if (offscreen_gl_[i].depth) { glDeleteRenderbuffers(1, &offscreen_gl_[i].depth); offscreen_gl_[i].depth = 0; }
+        offscreen_gl_[i].w = offscreen_gl_[i].h = 0;
+    }
+    color_ = nullptr;
+#else
     SDL_GPUDevice* dev = ctx_.device();
     for (SDL_GPUTexture** t : {&color_, &msaa_, &depth_, &scene_, &last_, &snap_, &half_}) {
         if (*t) SDL_ReleaseGPUTexture(dev, *t);
         *t = nullptr;
     }
+#endif
     last_valid_ = snap_valid_ = false;
     width_ = height_ = 0;
 }
 
 bool View3D::ensure_target(SDL_Renderer* renderer, int w, int h) {
+#if defined(__SWITCH__)
+    if (w == width_ && h == height_ && wrapper_) return true;
+    release_target();
+    width_ = w;
+    height_ = h;
+
+    glGenFramebuffers(1, &fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+
+    glGenTextures(1, &color_tex_);
+    glBindTexture(GL_TEXTURE_2D, color_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex_, 0);
+
+    glGenRenderbuffers(1, &depth_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb_);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOG_ERROR("View3D: Framebuffer incomplete: 0x%x", status);
+        return false;
+    }
+
+    color_ = (SDL_GPUTexture*)(uintptr_t)color_tex_;
+    wrapper_ = wrap(renderer, color_, w, h);
+    return wrapper_ != nullptr;
+#else
     if (w == width_ && h == height_ && samples_ == ctx_.msaa() && wrapper_) return true;
     release_target();
     SDL_GPUDevice* dev = ctx_.device();
@@ -185,23 +232,26 @@ bool View3D::ensure_target(SDL_Renderer* renderer, int w, int h) {
     height_ = h;
     samples_ = ctx_.msaa();
     return true;
+#endif
 }
 
 // `texture` (w x h) as an SDL_Renderer texture: replaces what is behind, scaled linearly.
 SDL_Texture* View3D::wrap(SDL_Renderer* renderer, SDL_GPUTexture* texture, int w, int h) {
     SDL_Texture* t = nullptr;
-#if GT3R_HAVE_GPU_RENDERER
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_ABGR8888);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, w);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, h);
+#if defined(__SWITCH__)
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_OPENGLES2_TEXTURE_NUMBER, (Uint64)(uintptr_t)texture);
+#elif GT3R_HAVE_GPU_RENDERER
     SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, texture);
+#else
+    (void)texture;
+#endif
     t = SDL_CreateTextureWithProperties(renderer, props);
     SDL_DestroyProperties(props);
-#else
-    (void)renderer, (void)texture, (void)w, (void)h;
-#endif
     if (!t) {
         LOG_WARN("Could not wrap the 3D target for the 2D renderer: %s", SDL_GetError());
         return nullptr;
@@ -242,6 +292,95 @@ bool View3D::ensure_half(SDL_Renderer* renderer) {
 
 void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& view, const Mat4& proj, const Vec3& eye,
                   const std::vector<DrawItem>& items, const DrawOptions& opt) {
+#if defined(__SWITCH__)
+    float sx = 1, sy = 1;
+    int lw = 0, lh = 0;
+    SDL_RendererLogicalPresentation mode;
+    SDL_FRect lr;
+    if (SDL_GetRenderLogicalPresentation(renderer, &lw, &lh, &mode) && lw > 0 && lh > 0 &&
+        SDL_GetRenderLogicalPresentationRect(renderer, &lr)) {
+        sx = lr.w / float(lw);
+        sy = lr.h / float(lh);
+    }
+    const float out_w = rect.w * sx, out_h = rect.h * sy;
+    const float scale = std::min(ctx_.render_scale(), 1.0f);
+    auto px = [](float v) { return std::max(1, int(std::lround(v))); };
+    int pw = px(out_w * scale), ph = px(out_h * scale);
+    if (opt.fixed_width > 0 && opt.fixed_height > 0) pw = opt.fixed_width, ph = opt.fixed_height;
+    if (!ensure_target(renderer, pw, ph)) return;
+    used_w_ = pw, used_h_ = ph;
+
+    SDL_FlushRenderer(renderer);
+
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    GLint prev_prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+    GLint prev_vao = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+    GLint prev_viewport[4];
+    glGetIntegerv(GL_VIEWPORT, prev_viewport);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glBindVertexArray(ctx_.gl_vao());
+    glViewport(0, 0, pw, ph);
+    glDisable(GL_SCISSOR_TEST);
+    glFrontFace(GL_CCW);
+    glCullFace(GL_BACK);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(opt.clear[0], opt.clear[1], opt.clear[2], opt.clear[3]);
+    glClearDepthf(0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(ctx_.gl_program());
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GEQUAL);
+    glDisable(GL_CULL_FACE);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, opt.env_cube ? (GLuint)(uintptr_t)opt.env_cube : ctx_.gl_dummy_cube());
+    glBindSampler(1, ctx_.gl_sampler(3));
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, opt.env_sphere ? (GLuint)(uintptr_t)opt.env_sphere : ctx_.gl_white());
+    glBindSampler(2, ctx_.gl_sampler(3));
+    glActiveTexture(GL_TEXTURE0);
+
+    encode_gles3(view, proj, eye, items, opt);
+
+    glBindSampler(1, 0);
+    glBindSampler(2, 0);
+    glBindSampler(0, 0);
+    glBindVertexArray(prev_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+    glUseProgram(prev_prog);
+    glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glFrontFace(GL_CCW);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        LOG_INFO("View3D::draw: First 3D draw %dx%d (scale %.2f), items=%zu, wrapper=%p, rect=(%.1f,%.1f,%.1f,%.1f)",
+                 pw, ph, scale, items.size(), wrapper_, rect.x, rect.y, rect.w, rect.h);
+    }
+
+    bool over = opt.clear[3] < 1.0f || opt.composite_alpha < 1.0f;
+    SDL_SetTextureBlendMode(wrapper_, over ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_SetTextureAlphaModFloat(wrapper_, std::clamp(opt.composite_alpha, 0.0f, 1.0f));
+    const SDL_FRect src{0, 0, float(pw), float(ph)};
+    SDL_RenderTextureRotated(renderer, wrapper_, &src, &rect, 0.0, nullptr, SDL_FLIP_VERTICAL);
+    SDL_SetTextureAlphaModFloat(wrapper_, 1.0f);
+    return;
+#else
     // Logical (UI) rectangle -> physical pixels.
     float sx = 1, sy = 1;
     int lw = 0, lh = 0;
@@ -393,6 +532,7 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
     const SDL_FRect src{0, 0, float(sw) - (sw < tw ? inset : 0.0f), float(sh) - (sh < th ? inset : 0.0f)};
     SDL_RenderTexture(renderer, shown, &src, &rect);
     SDL_SetTextureAlphaModFloat(shown, 1.0f);
+#endif
 }
 
 bool View3D::post_wanted(const DrawOptions& o) const {
@@ -1084,6 +1224,64 @@ void View3D::release_offscreen() {
 
 SDL_GPUTexture* View3D::render_offscreen(int slot, int w, int h, const Mat4& view, const Mat4& proj, const Vec3& eye,
                                          const std::vector<DrawItem>& items, const DrawOptions& opt) {
+#if defined(__SWITCH__)
+    if (slot < 0 || slot >= 4 || w <= 0 || h <= 0) return nullptr;
+    OffscreenGL& o = offscreen_gl_[slot];
+    if (!o.color || o.w != w || o.h != h) {
+        if (o.fbo) glDeleteFramebuffers(1, &o.fbo);
+        if (o.color) glDeleteTextures(1, &o.color);
+        if (o.depth) glDeleteRenderbuffers(1, &o.depth);
+        o.w = w; o.h = h;
+        glGenFramebuffers(1, &o.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, o.fbo);
+        glGenTextures(1, &o.color);
+        glBindTexture(GL_TEXTURE_2D, o.color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, o.color, 0);
+
+        glGenRenderbuffers(1, &o.depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, o.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, o.depth);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    GLint prev_viewport[4];
+    glGetIntegerv(GL_VIEWPORT, prev_viewport);
+    GLint prev_prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+    GLint prev_vao = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+
+    DrawStats keep_stats = stats_;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, o.fbo);
+    glBindVertexArray(ctx_.gl_vao());
+    glViewport(0, 0, w, h);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(opt.clear[0], opt.clear[1], opt.clear[2], opt.clear[3]);
+    glClearDepthf(0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(ctx_.gl_program());
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GEQUAL);
+
+    encode_gles3(view, proj, eye, items, opt);
+
+    stats_ = keep_stats;
+
+    glBindVertexArray(prev_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+    glUseProgram(prev_prog);
+    glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+    return (SDL_GPUTexture*)(uintptr_t)o.color;
+#else
     if (slot < 0 || slot >= 4 || w <= 0 || h <= 0) return nullptr;
     Offscreen& o = offscreen_[slot];
     SDL_GPUDevice* dev = ctx_.device();
@@ -1149,6 +1347,7 @@ SDL_GPUTexture* View3D::render_offscreen(int slot, int w, int h, const Mat4& vie
     SDL_SubmitGPUCommandBuffer(cmd);
     stats_ = keep;
     return o.color;
+#endif
 }
 
 void View3D::release_cube() {
@@ -1161,6 +1360,9 @@ void View3D::release_cube() {
 }
 
 bool View3D::ensure_cube(int size) {
+#if defined(__SWITCH__)
+    return true;
+#else
     if (cube_ && size == cube_size_ && cube_samples_ == ctx_.msaa()) return true;
     SDL_GPUDevice* dev = ctx_.device();
     release_cube();
@@ -1194,10 +1396,15 @@ bool View3D::ensure_cube(int size) {
     cube_size_ = size;
     cube_samples_ = ctx_.msaa();
     return true;
+#endif
 }
 
 SDL_GPUTexture* View3D::render_env_cube(const Vec3& pos, const std::vector<DrawItem>& items, const DrawOptions& opt,
                                         int size, unsigned faces) {
+#if defined(__SWITCH__)
+    (void)pos; (void)items; (void)opt; (void)size; (void)faces;
+    return (SDL_GPUTexture*)(uintptr_t)ctx_.gl_dummy_cube();
+#else
     if (!ensure_cube(size)) return nullptr;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx_.device());
     if (!cmd) return nullptr;
@@ -1252,6 +1459,416 @@ SDL_GPUTexture* View3D::render_env_cube(const Vec3& pos, const std::vector<DrawI
     SDL_SubmitGPUCommandBuffer(cmd);
     stats_ = keep;
     return cube_;
+#endif
 }
+
+#if defined(__SWITCH__)
+void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
+                          const std::vector<DrawItem>& items, const DrawOptions& opt) {
+    Mat4 view_proj = proj * view;
+    float planes[6][4];
+    if (opt.frustum_cull) {
+        for (int i = 0; i < 4; ++i) {
+            float r0 = view_proj.at(0, i), r1 = view_proj.at(1, i), r2 = view_proj.at(2, i), r3 = view_proj.at(3, i);
+            planes[0][i] = r3 + r0, planes[1][i] = r3 - r0, planes[2][i] = r3 + r1;
+            planes[3][i] = r3 - r1, planes[4][i] = r2, planes[5][i] = r3 - r2;
+        }
+        for (auto& p : planes) {
+            float l = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            if (l > 0)
+                for (float& v : p) v /= l;
+        }
+    }
+
+    FragmentUniforms fu{};
+    fu.light_dir[0] = opt.light_dir.x; fu.light_dir[1] = opt.light_dir.y; fu.light_dir[2] = opt.light_dir.z;
+    fu.camera_pos[0] = eye.x; fu.camera_pos[1] = eye.y; fu.camera_pos[2] = eye.z; fu.camera_pos[3] = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+        fu.fog_color[i] = opt.fog_color[i];
+        fu.light_ambient[i] = opt.light_ambient[i];
+        fu.light_diffuse[i] = opt.light_diffuse[i];
+        fu.light_specular[i] = opt.light_specular[i];
+        fu.env_sky[i] = opt.env_sky[i];
+        fu.env_horizon[i] = opt.env_horizon[i];
+        fu.env_ground[i] = opt.env_ground[i];
+    }
+    fu.light_dir[3] = opt.ambient;
+    fu.fog_color[3] = opt.fog ? 1.0f : 0.0f;
+    fu.fog_params[0] = opt.fog_start;
+    fu.fog_params[1] = 1.0f / std::max(opt.fog_end - opt.fog_start, 1e-4f);
+    fu.fog_params[2] = opt.fog_max;
+    fu.fog_params[3] = opt.fog_gt3 ? 1.0f : 0.0f;
+    for (int k = 0; k < std::min(opt.fill_count, 3); ++k) {
+        float* d = k == 0 ? fu.light2_dir : k == 1 ? fu.light3_dir : fu.light4_dir;
+        float* df = k == 0 ? fu.light2_diffuse : k == 1 ? fu.light3_diffuse : fu.light4_diffuse;
+        float* sp = k == 0 ? fu.light2_specular : k == 1 ? fu.light3_specular : fu.light4_specular;
+        for (int i = 0; i < 3; ++i) d[i] = opt.fill_dir[k][i], df[i] = opt.fill_diffuse[k][i], sp[i] = opt.fill_specular[k][i];
+        d[3] = 1.0f;
+    }
+    fu.light_ambient[3] = opt.gt3_lighting ? 1.0f : 0.0f;
+    fu.env_sky[3] = opt.reflection_fresnel;
+    fu.env_ground[3] = opt.env_sphere ? 3.0f : opt.env_cube ? (opt.env_gt3_lookup ? 2.0f : 1.0f) : 0.0f;
+    for (float& t : fu.tint) t = 1.0f;
+    for (int i = 0; i < 4; ++i) fu.view_row0[i] = view.at(0, i), fu.view_row1[i] = view.at(1, i);
+
+    const FragmentUniforms base_fu = fu;
+
+    stats_ = {};
+
+    struct Visible {
+        const DrawItem* item;
+        const GpuModel::MeshInfo* mesh;
+        Mat4 world;
+        float dist;
+    };
+    std::vector<Visible> vis;
+    for (const DrawItem& item : items) {
+        const GpuModel* model = item.model;
+        if (!model || !model->valid()) continue;
+        int lod = item.lod == -2 ? opt.lod : item.lod;
+        float max_dist = item.draw_distance >= 0 ? item.draw_distance : opt.draw_distance;
+        for (const GpuModel::MeshInfo& mesh : model->meshes()) {
+            if (lod >= 0 && mesh.lod != lod) continue;
+            Mat4 world = item.transform * mesh.transform;
+            Vec3 c = world.transform_point(mesh.center);
+            float sc = 0;
+            for (int col = 0; col < 3; ++col)
+                sc = std::max(sc, length(Vec3{world.at(0, col), world.at(1, col), world.at(2, col)}));
+            float r = mesh.radius * sc;
+            float dist = length(c - eye);
+            if (!item.background && !item.helper) {
+                bool culled = max_dist > 0 && dist - r > max_dist;
+                if (opt.frustum_cull && !culled)
+                    for (const auto& p : planes)
+                        if (p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] < -r) {
+                            culled = true;
+                            break;
+                        }
+                if (culled) {
+                    ++stats_.meshes_culled;
+                    continue;
+                }
+            }
+            vis.push_back({&item, &mesh, world, dist});
+        }
+    }
+
+    static int s_encode_log = 0;
+    if (s_encode_log++ < 3) {
+        LOG_INFO("encode_gles3: items=%zu, vis=%zu, planes=%s", items.size(), vis.size(), opt.frustum_cull ? "true" : "false");
+        for (size_t i = 0; i < vis.size(); ++i) {
+            const Visible& v = vis[i];
+            const GpuModel* model = v.item->model;
+            LOG_INFO("  vis[%zu]: model=%p, vbo=%u, ibo=%u, prims=%zu, voff=%d, ioff=%u",
+                     i, model, (GLuint)(uintptr_t)model->vertex_buffer(), (GLuint)(uintptr_t)model->index_buffer(),
+                     v.mesh->primitives.size(), v.mesh->vertex_offset, v.mesh->index_offset);
+        }
+    }
+
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ctx_.gl_ubo_vert());
+    glBindBufferBase(GL_UNIFORM_BUFFER, 1, ctx_.gl_ubo_vert_lit());
+    glBindBufferBase(GL_UNIFORM_BUFFER, 2, ctx_.gl_ubo_frag());
+
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
+
+    GLuint bound_vbo = 0;
+    GLuint bound_ibo = 0;
+    uintptr_t bound_v_base = UINTPTR_MAX;
+    GLuint bound_tex = 0;
+    GLuint bound_sampler = 0;
+    int bound_cull = -1; // -1: uninit, 0: disabled, 1: back, 2: front
+    int bound_blend = -1; // -1: uninit, 0: disabled, 1: additive, 2: alpha, 3: dest_lerp, 4: dest_add
+    int bound_depth_mask = -1;
+    int bound_color_mask = -1; // -1: uninit, 0: RGBA, 1: Alpha only
+
+    bool prev_vl_valid = false;
+    VertexLighting prev_vl{};
+    FragmentUniforms prev_fu{};
+    bool prev_fu_valid = false;
+
+    const DrawItem* prev_item = nullptr;
+    FragmentUniforms base_item_fu = base_fu;
+
+    // Reset vl to unlit initially
+    {
+        VertexLighting init_vl{};
+        glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(init_vl), &init_vl);
+    }
+
+    static const Mat4 kIdentity{};
+
+    for (const Visible& v : vis) {
+        const GpuModel* model = v.item->model;
+        GLuint vbo = (GLuint)(uintptr_t)model->vertex_buffer();
+        GLuint ibo = (GLuint)(uintptr_t)model->index_buffer();
+        uintptr_t v_base = uintptr_t(v.mesh->vertex_offset) * sizeof(scene::Vertex);
+
+        bool need_attrib_update = (vbo != bound_vbo || v_base != bound_v_base);
+        if (vbo != bound_vbo) {
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            bound_vbo = vbo;
+        }
+        if (ibo != bound_ibo) {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+            bound_ibo = ibo;
+        }
+        if (need_attrib_update) {
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, pos)));
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, normal)));
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, uv)));
+            glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, color)));
+            bound_v_base = v_base;
+        }
+
+        bool is_ident = (std::memcmp(v.world.m.data(), kIdentity.m.data(), sizeof(kIdentity.m)) == 0);
+        Mat4 mvp = is_ident ? view_proj : view_proj * v.world;
+        Mat4 nm = is_ident ? kIdentity : transpose(inverse(v.world));
+        VertexUniforms vu{};
+        std::copy(mvp.m.begin(), mvp.m.end(), vu.mvp);
+        std::copy(v.world.m.begin(), v.world.m.end(), vu.model);
+        std::copy(nm.m.begin(), nm.m.end(), vu.normal_mat);
+        for (int i = 0; i < 4; ++i) vu.view_z[i] = view.at(2, i);
+        vu.fog[0] = opt.fog_start, vu.fog[1] = opt.fog_max, vu.fog[2] = opt.fog_gt3 ? 1.0f : 0.0f;
+
+        glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert());
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vu), &vu);
+
+        if (v.item != prev_item) {
+            prev_item = v.item;
+            base_item_fu = base_fu;
+            base_item_fu.tint[0] = base_item_fu.tint[1] = base_item_fu.tint[2] = v.item->tint;
+            base_item_fu.tint[3] = std::max(v.item->alpha, 0.0f);
+
+            if (const ItemLights* il = v.item->lights) {
+                float* dirs[4] = {base_item_fu.light_dir, base_item_fu.light2_dir, base_item_fu.light3_dir, base_item_fu.light4_dir};
+                float* difs[4] = {base_item_fu.light_diffuse, base_item_fu.light2_diffuse, base_item_fu.light3_diffuse, base_item_fu.light4_diffuse};
+                float* spes[4] = {base_item_fu.light_specular, base_item_fu.light2_specular, base_item_fu.light3_specular, base_item_fu.light4_specular};
+                for (int k = 0; k < 4; ++k) {
+                    bool on = k < il->count;
+                    for (int i = 0; i < 3; ++i) {
+                        dirs[k][i] = on ? il->dir[k][i] : 0.0f;
+                        difs[k][i] = on ? il->diffuse[k][i] * v.item->light_scale[1] : 0.0f;
+                        spes[k][i] = on ? il->specular[k][i] * v.item->light_scale[2] : 0.0f;
+                    }
+                    if (k == 0 && !on) dirs[0][1] = 1.0f;
+                    if (k > 0) dirs[k][3] = on ? 1.0f : 0.0f;
+                }
+                for (int i = 0; i < 3; ++i) base_item_fu.light_ambient[i] = il->ambient[i] * v.item->light_scale[0];
+            } else if (v.item->light_scale[0] != 1.0f || v.item->light_scale[1] != 1.0f || v.item->light_scale[2] != 1.0f) {
+                for (int i = 0; i < 3; ++i) {
+                    base_item_fu.light_ambient[i] = opt.light_ambient[i] * v.item->light_scale[0];
+                    base_item_fu.light_diffuse[i] = opt.light_diffuse[i] * v.item->light_scale[1];
+                    base_item_fu.light_specular[i] = opt.light_specular[i] * v.item->light_scale[2];
+                }
+                float* difs[3] = {base_item_fu.light2_diffuse, base_item_fu.light3_diffuse, base_item_fu.light4_diffuse};
+                float* spes[3] = {base_item_fu.light2_specular, base_item_fu.light3_specular, base_item_fu.light4_specular};
+                for (int k = 0; k < 3; ++k) {
+                    for (int i = 0; i < 3; ++i) {
+                        difs[k][i] = opt.fill_diffuse[k][i] * v.item->light_scale[1];
+                        spes[k][i] = opt.fill_specular[k][i] * v.item->light_scale[2];
+                    }
+                }
+            }
+        }
+
+        static int s_first_draw = 0;
+        if (s_first_draw++ < 3) {
+            LOG_INFO("encode_gles3 draw: mvp[0]=%.3f, mvp[5]=%.3f, mvp[10]=%.3f, mvp[14]=%.3f, prims=%zu",
+                     vu.mvp[0], vu.mvp[5], vu.mvp[10], vu.mvp[14], v.mesh->primitives.size());
+        }
+
+        for (const scene::Primitive& p : v.mesh->primitives) {
+            bool double_sided = (p.flags & scene::kDoubleSided) && !v.item->single_sided;
+            int desired_cull = 0;
+            if (!double_sided && opt.cull != CullMode::None) {
+                GLenum cull_face = (opt.cull == CullMode::Front) ? GL_FRONT : GL_BACK;
+                if (opt.mirrored) cull_face = (cull_face == GL_BACK) ? GL_FRONT : GL_BACK;
+                desired_cull = (cull_face == GL_FRONT) ? 2 : 1;
+            }
+            if (desired_cull != bound_cull) {
+                if (desired_cull == 0) {
+                    glDisable(GL_CULL_FACE);
+                } else {
+                    if (bound_cull <= 0) glEnable(GL_CULL_FACE);
+                    glCullFace(desired_cull == 2 ? GL_FRONT : GL_BACK);
+                }
+                bound_cull = desired_cull;
+            }
+
+            int desired_color_mask = 0;
+            if (v.item->frame_alpha && (p.flags & scene::kAlphaOnly)) {
+                desired_color_mask = 1;
+            }
+            if (desired_color_mask != bound_color_mask) {
+                if (desired_color_mask == 1) {
+                    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+                } else {
+                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                }
+                bound_color_mask = desired_color_mask;
+            }
+
+            int desired_blend = 0;
+            if (v.item->dest_alpha_blend == 1) {
+                desired_blend = 3;
+            } else if (v.item->dest_alpha_blend == 2) {
+                desired_blend = 4;
+            } else if (p.flags & scene::kAdditive) {
+                desired_blend = 1;
+            } else if ((p.flags & scene::kAlphaBlend) || v.item->alpha < 1.0f) {
+                desired_blend = 2;
+            }
+
+            if (desired_blend != bound_blend) {
+                if (desired_blend == 0) {
+                    glDisable(GL_BLEND);
+                } else if (desired_blend == 1) {
+                    if (bound_blend <= 0) glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                } else if (desired_blend == 2) {
+                    if (bound_blend <= 0) glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                } else if (desired_blend == 3) {
+                    if (bound_blend <= 0) glEnable(GL_BLEND);
+                    glBlendFunc(GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA);
+                } else if (desired_blend == 4) {
+                    if (bound_blend <= 0) glEnable(GL_BLEND);
+                    glBlendFunc(GL_DST_ALPHA, GL_ONE);
+                }
+                bound_blend = desired_blend;
+            }
+
+            int desired_depth_mask = (!(p.flags & scene::kNoDepthWrite) && !v.item->background) ? 1 : 0;
+            if (desired_depth_mask != bound_depth_mask) {
+                glDepthMask(desired_depth_mask ? GL_TRUE : GL_FALSE);
+                bound_depth_mask = desired_depth_mask;
+            }
+
+            GLuint tex = ctx_.gl_white();
+            int clamp_mode = 0;
+            bool textured = false;
+            if (v.item->texture) {
+                tex = (GLuint)(uintptr_t)v.item->texture;
+                clamp_mode = 3;
+                textured = true;
+            } else if (p.texture >= 0 && size_t(p.texture) < model->textures().size()) {
+                const GpuModel::TextureInfo& ti = model->textures()[size_t(p.texture)];
+                if (ti.texture) {
+                    tex = (GLuint)(uintptr_t)ti.texture;
+                    clamp_mode = (ti.clamp_u ? 1 : 0) | (ti.clamp_v ? 2 : 0) | (ti.no_mips ? 4 : 0);
+                    textured = true;
+                }
+            }
+            if (tex != bound_tex) {
+                glBindTexture(GL_TEXTURE_2D, tex);
+                bound_tex = tex;
+            }
+            GLuint samp = ctx_.gl_sampler(clamp_mode);
+            if (samp != bound_sampler) {
+                glBindSampler(0, samp);
+                bound_sampler = samp;
+            }
+
+            FragmentUniforms fu = base_item_fu;
+            bool blended_prim = (p.flags & (scene::kAdditive | scene::kAlphaBlend | scene::kMultiplyDest | scene::kAlphaOnly)) != 0 || v.item->alpha < 1.0f;
+            fu.grade2[3] = !blended_prim ? 1.0f : 0.0f;
+            fu.params[0] = !(p.flags & scene::kAlphaTest) ? -1.0f
+                           : p.alpha_ref >= 0 ? p.alpha_ref
+                           : blended_prim ? opt.blend_alpha_ref : opt.alpha_ref;
+            fu.params[1] = (p.flags & scene::kUnlit) ? 1.0f : 0.0f;
+            bool env_add = (p.flags & scene::kAdditive) && (p.flags & scene::kEnvironmentMap);
+            bool reflection = env_add && ((p.flags & scene::kUnlit) || !textured);
+            bool sheen = p.material.valid && p.material.specular_local && !(p.flags & scene::kUnlit);
+            fu.params[2] = reflection ? opt.reflection_strength : (p.flags & scene::kEnvironmentMap) ? opt.env_strength : 0.0f;
+            if (reflection) fu.params[2] *= v.item->reflection_scale;
+            fu.params[3] = reflection ? 3.0f : sheen ? 2.0f : 0.0f;
+
+            fu.env_c0[3] = p.env_rows ? 1.0f : 0.0f;
+            for (int i = 0; i < 3; ++i) fu.env_c0[i] = p.env_c0[i], fu.env_c1[i] = p.env_c1[i];
+
+            const scene::Material& mt = p.material;
+            fu.mat_ambient[3] = mt.valid ? 1.0f : 0.0f;
+            if (mt.valid) {
+                for (int i = 0; i < 3; ++i) {
+                    fu.mat_ambient[i] = mt.ambient[i], fu.mat_diffuse[i] = mt.diffuse[i];
+                    fu.mat_specular[i] = mt.specular[i], fu.mat_emission[i] = mt.emission[i] + mt.lamp_emission[i] * v.item->lamp;
+                }
+                fu.mat_diffuse[3] = mt.scale;
+                fu.mat_emission[3] = textured ? 1.0f : 128.0f / 255.0f;
+                bool spec = mt.specular[0] > 0 || mt.specular[1] > 0 || mt.specular[2] > 0;
+                fu.mat_specular[3] = !spec && !sheen ? 0.0f : mt.shininess < 6 ? 4.0f : mt.shininess < 12 ? 8.0f : 16.0f;
+            }
+
+            const bool vertex_lit = mt.valid && fu.params[1] < 0.5f && (fu.params[3] < 0.5f || sheen);
+            if (vertex_lit) {
+                VertexLighting vl{};
+                for (int i = 0; i < 3; ++i) vl.eye_dir[i] = view.at(2, i);
+                vl.eye_dir[3] = 1.0f;
+                if (sheen) {
+                    constexpr float kViewerUp = 2.0f;
+                    const float s = v.item->modelview_scale;
+                    for (int i = 0; i < 3; ++i) vl.eye_dir[i] = s * s * fu.camera_pos[i] + kViewerUp * s * view.at(1, i);
+                    vl.eye_dir[3] = 2.0f;
+                }
+                const float* dirs[4] = {fu.light_dir, fu.light2_dir, fu.light3_dir, fu.light4_dir};
+                const float* difs[4] = {fu.light_diffuse, fu.light2_diffuse, fu.light3_diffuse, fu.light4_diffuse};
+                const float* spes[4] = {fu.light_specular, fu.light2_specular, fu.light3_specular, fu.light4_specular};
+                for (int k = 0; k < 4; ++k) {
+                    for (int i = 0; i < 3; ++i) {
+                        vl.light_dir[k][i] = dirs[k][i];
+                        vl.light_diffuse[k][i] = difs[k][i];
+                        vl.light_specular[k][i] = spes[k][i];
+                    }
+                    vl.light_dir[k][3] = k == 0 ? 1.0f : dirs[k][3];
+                }
+                std::copy(std::begin(fu.light_ambient), std::end(fu.light_ambient), vl.light_ambient);
+                std::copy(std::begin(fu.mat_ambient), std::end(fu.mat_ambient), vl.mat_ambient);
+                std::copy(std::begin(fu.mat_diffuse), std::end(fu.mat_diffuse), vl.mat_diffuse);
+                std::copy(std::begin(fu.mat_specular), std::end(fu.mat_specular), vl.mat_specular);
+                std::copy(std::begin(fu.mat_emission), std::end(fu.mat_emission), vl.mat_emission);
+
+                if (!prev_vl_valid || std::memcmp(&vl, &prev_vl, sizeof(vl)) != 0) {
+                    glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
+                    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vl), &vl);
+                    prev_vl = vl;
+                    prev_vl_valid = true;
+                }
+            } else if (prev_vl_valid) {
+                // Return to unlit
+                VertexLighting vl{};
+                glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
+                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vl), &vl);
+                prev_vl_valid = false;
+            }
+
+            if (!prev_fu_valid || std::memcmp(&fu, &prev_fu, sizeof(fu)) != 0) {
+                glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_frag());
+                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fu), &fu);
+                prev_fu = fu;
+                prev_fu_valid = true;
+            }
+
+            u32 first = v.mesh->index_offset + p.first_index;
+            if (p.index_count > 0) {
+                glDrawElements(GL_TRIANGLES, p.index_count, GL_UNSIGNED_INT, (void*)(uintptr_t)(first * sizeof(u32)));
+                ++stats_.draw_calls;
+                stats_.triangles += p.index_count / 3;
+            }
+        }
+        ++stats_.meshes_drawn;
+    }
+
+    if (bound_color_mask != 0) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+}
+#endif
 
 } // namespace gt3r::render

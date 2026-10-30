@@ -67,6 +67,11 @@ float box_visibility(float px, float py, float z, const SDL_FRect& rect, const r
     if (zt <= 0) return 1; // tested at the near plane: everything is behind it
     const render::Vec3 ax{view.at(0, 0), view.at(0, 1), view.at(0, 2)}, ay{view.at(1, 0), view.at(1, 1), view.at(1, 2)},
         az{view.at(2, 0), view.at(2, 1), view.at(2, 2)};
+#if defined(__SWITCH__)
+    float rx = fr.left + (px - rect.x) / rect.w * (fr.right - fr.left);
+    float ry = fr.up - (py - rect.y) / rect.h * (fr.up - fr.down);
+    return blocked(eye, eye + ax * (rx * zt) + ay * (ry * zt) - az * zt) ? 0.0f : 1.0f;
+#else
     const float step = 10.0f / 3.0f * rect.h / 448.0f;
     int open = 0;
     for (int gy = -1; gy <= 1; ++gy)
@@ -77,6 +82,7 @@ float box_visibility(float px, float py, float z, const SDL_FRect& rect, const r
             open += blocked(eye, eye + ax * (rx * zt) + ay * (ry * zt) - az * zt) ? 0 : 1;
         }
     return std::min(1.0f, 2.0f * float(open) / 9.0f);
+#endif
 }
 
 // d^n for the directional factors, as the original: n = 0 gives 1, n <= 1 gives d itself.
@@ -272,7 +278,11 @@ void LampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Mat4&
     std::vector<Kept> kept;
     auto visit = [&](const std::vector<Lamp>& list) {
         for (const Lamp& l : list) {
+#if defined(__SWITCH__)
+            if (kept.size() >= 35) return;
+#else
             if (kept.size() >= 100) return;
+#endif
             const LampType& ty = types_[size_t(l.type)];
             render::Vec3 v = to_view(view, l.pos);
             float z = -v.z;
@@ -404,7 +414,11 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
     int kept = 0;
     // `glow`: head and brake lamps (tail lamps only ever get the halo); `I` the brake factor.
     auto lamp = [&](const Car& car, const CarLampRecord& l, bool glow, float I) {
+#if defined(__SWITCH__)
+        if (kept >= 25) return;
+#else
         if (kept >= 100) return;
+#endif
         // Screen test at the test point: in front, within the max distance, the square of
         // halo x max(a, b) on screen.
         render::Vec3 tp = car.model.transform_point(l.test);

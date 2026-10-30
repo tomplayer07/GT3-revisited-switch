@@ -89,6 +89,9 @@ bool WetRoad::load(render::GpuContext& ctx, const Vfs& vfs, ByteSpan course, Byt
     p_.width = std::clamp(int(rd32(env, 0xC24)), 8, 1024);
     p_.height = std::clamp(int(rd32(env, 0xC28)), 8, 1024);
     p_.blur = std::clamp(int(rd32(env, 0xC2C)), 0, 16);
+#if defined(__SWITCH__)
+    p_.blur = std::min(p_.blur, 1);
+#endif
     p_.fog_rgb = {rdf(env, 0xC40), rdf(env, 0xC44), rdf(env, 0xC48)};
     p_.fog_a = rdf(env, 0xC50), p_.fog_b = rdf(env, 0xC54);
     p_.cars = (flags & 0x10000) != 0;

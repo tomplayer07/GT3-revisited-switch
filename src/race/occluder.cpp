@@ -66,6 +66,7 @@ bool Occluder::blocked(const Vec3& o, const Vec3& d, float max_dist) const {
     ++frame_;
     // March along the ray in half-cell steps; stop above the highest triangle or out of the grid.
     float step = cell_ * 0.5f;
+    int last_ix = -999999, last_iz = -999999;
     for (float s = 0; s < max_dist; s += step) {
         Vec3 p = o + d * s;
         if (p.y > max_y_ && d.y >= 0) return false;
@@ -74,6 +75,8 @@ bool Occluder::blocked(const Vec3& o, const Vec3& d, float max_dist) const {
             if ((ix < 0 && d.x <= 0) || (ix >= nx_ && d.x >= 0) || (iz < 0 && d.z <= 0) || (iz >= nz_ && d.z >= 0)) return false;
             continue;
         }
+        if (ix == last_ix && iz == last_iz) continue;
+        last_ix = ix; last_iz = iz;
         for (u32 ti : cells_[size_t(iz) * size_t(nx_) + size_t(ix)]) {
             if (stamp_[ti] == frame_) continue;
             stamp_[ti] = frame_;

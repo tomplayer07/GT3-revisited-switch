@@ -45,6 +45,17 @@ s64 get_time(ByteSpan b, size_t o) {
     if (tm.tm_year < 70 || tm.tm_mon < 0 || tm.tm_mday < 1) return 0;
 #ifdef _WIN32
     s64 t = s64(_mkgmtime(&tm));
+#elif defined(__SWITCH__)
+    // Portable timegm for newlib
+    int y = tm.tm_year + 1900;
+    int m = tm.tm_mon + 1;
+    if (m <= 2) { y -= 1; m += 12; }
+    int era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = static_cast<unsigned>(y - era * 400);
+    unsigned doy = (153 * (m - 3) + 2) / 5 + tm.tm_mday - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = era * 146097 + static_cast<int64_t>(doe) - 719468;
+    s64 t = s64(days * 86400 + tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec);
 #else
     s64 t = s64(timegm(&tm));
 #endif
