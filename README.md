@@ -1,7 +1,15 @@
-# GT3 Revisited
+# GT3 Revisited (Nintendo Switch Port)
 
 An open-source reimplementation of the *Gran Turismo 3 A-Spec* engine for
-modern platforms: **Windows, macOS, Linux, Android and Meta Quest (VR)**.
+modern platforms: **Nintendo Switch (Atmosphère)**, **Windows, macOS, Linux, Android and Meta Quest (VR)**.
+
+> [!NOTE]
+> **🎮 This is the Nintendo Switch port fork** ([tomplayer07/GT3-revisited-switch](https://github.com/tomplayer07/GT3-revisited-switch)), based on the original project by [matt-pulsipher/GT3-revisited](https://github.com/matt-pulsipher/GT3-revisited).
+> 
+> - **Native `.nro` homebrew** running on Atmosphère (Horizon OS).
+> - **Custom OpenGL ES 3.0 backend** (via Mesa / deko3d / SDL3) to replace Vulkan on Switch.
+> - **Solid 60 FPS** on daytime tracks (Circuit di Roma, Trial Mountain, Super Speedway, etc.).
+> - **Status & Community Help Wanted**: Night tracks (Special Stage Route 5, Route 11) are playable but experience performance drops (~25-35 FPS). Community contributions and optimizations are welcome! See details [below](#-nintendo-switch-port).
 
 GT3 Revisited contains **no game data or assets**. It needs a
 disc image (`.iso`) that you made from your own copy of the game. At runtime
@@ -42,6 +50,53 @@ and with automated tests. It contains no game data or assets; all game
 content is read from your own disc at runtime. The rules for contributions
 are in [CONTRIBUTING](CONTRIBUTING.md).
 
+## 🎮 Nintendo Switch Port
+
+This fork brings native Nintendo Switch support to *GT3 Revisited*, compiling directly to a standalone `.nro` homebrew binary.
+
+### Key Changes from Upstream
+- **OpenGL ES 3.0 Rendering Backend**: Upstream GT3 Revisited is designed strictly around Vulkan. Because homebrew Vulkan on Horizon OS is experimental and lacks stable driver integration, this port adds a native GLES 3.0 pipeline via Mesa on top of `libnx` and SDL3.
+- **Tegra X1 Shaders & Pipeline**: Converted SPIR-V shader programs into optimized GLES 3.0 GLSL with UBO caching, static uniform block binding, and normal matrix fast-paths for static course geometry.
+- **Switch Audio Engine**: Native SDL3 audio device integration with 48-voice software mixing and engine synthesis.
+- **Input Mapping**: Fully configured for Joy-Cons and Nintendo Switch Pro Controller with remappable analog throttle/brake and rumble.
+- **Optimized Memory & Draw Distance**: Tuned draw distances, frustum culling, and wet road reflection buffers for the Switch hardware profile.
+
+### Current Status
+- **Playable**: Yes, the entire game (GT Mode, Arcade, License Tests, Replays, Replay Theater, Audio, Saves).
+- **Daytime Tracks**: **Solid 60 FPS** (16.6 ms) on tracks like Super Speedway, Circuit di Roma, Trial Mountain with recommended overclock.
+- **Night Tracks (WIP / Help Wanted)**: Tracks with hundreds of dynamic street lamps and dense city structures (Special Stage Route 5, Route 11) run at ~25–35 FPS. The CPU software raycast occluder and draw call count are the current bottlenecks. Anyone interested in helping optimize the occluder or implement GPU depth testing on Switch is very welcome!
+
+### Installation on Switch
+1. Download or compile `gt3r.nro`.
+2. Place `gt3r.nro` on your SD card in:
+   ```
+   sdmc:/switch/gt3r/gt3r.nro
+   ```
+3. Place your *Gran Turismo 3 A-Spec* disc image (`.iso`) into the same folder or anywhere on your SD card:
+   ```
+   sdmc:/switch/gt3r/gt3.iso
+   ```
+4. **Important**: Launch the Homebrew Menu using **Title Override** (hold `R` while launching any installed game), **not Applet Mode**, so the game has access to the full 3.5+ GB of system RAM.
+5. **Recommended Overclock (via Sys-CLK)**:
+   - **CPU**: 1500 MHz - 1785 MHz
+   - **GPU**: 460 MHz - 768 MHz
+   - **MEM**: 1600 MHz
+
+### Building with Docker (devkitA64)
+You can compile the `.nro` locally on Linux, macOS, or Windows using the official devkitPro Docker container:
+
+```bash
+git clone https://github.com/tomplayer07/GT3-revisited-switch.git
+cd GT3-revisited-switch
+
+docker run --rm -v $(pwd):/workspace -w /workspace devkitpro/devkita64:latest bash -c \
+  "source /opt/devkitpro/switchvars.sh && \
+   cmake -B build-switch -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release && \
+   cmake --build build-switch -j\$(nproc)"
+```
+
+The resulting `gt3r.nro` will be in `build-switch/gt3r.nro`.
+
 ## Installing
 
 Download the package for your system from the
@@ -50,6 +105,8 @@ file carries a build attestation: `gh attestation verify <file> --repo
 matt-pulsipher/GT3-revisited` checks that it was built by this repository's workflow from
 the tagged source. The packages are not signed with a developer
 certificate, so the first launch needs one extra step:
+
+- **Nintendo Switch**: copy `gt3r.nro` to `sdmc:/switch/gt3r/gt3r.nro` and launch via title override. See [Nintendo Switch Port](#-nintendo-switch-port).
 
 - **Windows**: unzip and run `gt3r.exe`. If SmartScreen says "Windows
   protected your PC", choose **More info → Run anyway**.
