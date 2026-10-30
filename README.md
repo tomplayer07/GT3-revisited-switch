@@ -1,5 +1,7 @@
 # GT3 Revisited (Nintendo Switch Port)
 
+Premise: I honestly don’t know what the fuck I’m doing. I’ve always wanted to play Gran Turismo on a handheld, and beside that not so good PSP port, there are not many options. So, riding the wave of vibe coding and recompilation projects, here is the port to Nintendo Switch. It runs okay (as of the 30th of October). “I” did it in an evening with Gemini 3.8 flash, so not even the best model available right now(so if you have Claude, or you’re literally goatee and know how to work on this stuff, and want to help it’s really appreciated!). Biggest issue right now is performance with the night circuits (even when overclocked to 1785 mhz on CPU, 460 mhz on GPU and 1600 mhz on RAM). Big shout out to the original guys that are working on the GT3-revisited, proper lads (I don’t even know them and I hope I’m not causing any problems with this port). Everything else written in this readme will be stuff from the original fork and stuff that Gemini wrote. Idk, have fun I guess.
+
 An open-source reimplementation of the *Gran Turismo 3 A-Spec* engine for
 modern platforms: **Nintendo Switch (Atmosphère)**, **Windows, macOS, Linux, Android and Meta Quest (VR)**.
 
