@@ -750,6 +750,15 @@ its own) save a given state as a new or existing save without touching the runni
 game: the championship result quick menu's Save game (`make_game_save_screen`,
 `begin_race_game_save`: the game with the round just finished recorded) uses it.
 
+The save editor (main menu, `app/screen_save_editor.cpp`, `gt3r --screen saveeditor`) is
+ours: Settings-style pages over a save of the library (Career, Garage, Licenses, Races,
+Arcade). Its changes (`game/save_edit.h`, `GtMode::add_car` / `remove_car`) keep the state
+consistent the way the game does (wins never exceed races, a medal's best time earns that
+medal, the licence card follows the licence, the ride car follows a removal) but play
+nothing: no prize car or prize money is given for a result set by hand. It edits
+the save being played as the session has it (`editable_save`: it can be a race ahead of
+its file), and `store_edited_save` writes the file and hands the running game the edit.
+
 ### Save format
 
 UTF-8 text, written atomically (`.tmp` + rename):
@@ -828,6 +837,10 @@ filled in), the data file and the 0x60-byte `thumbnail`. The containers are in
 `src/formats/ps2/memcard.*`: the card writer formats like the PS2 BIOS (same
 superblock, FAT, directory entries and page ECC as a card the BIOS formatted in
 PCSX2, apart from the time stamps). `.max` / `.cbs` are not supported.
+gt3tool reads the disc through a `Vfs` without mods, as the app does, so its
+region, language and program files answer and both commands use the disc
+release's folder, minor version and language word (the region's own language;
+`save-export --lang=XX` another of the release's, `gtmode_disc_ps2_save_own_release`).
 
 Verified in PCSX2 (original game, folder and `.ps2` cards, October 2026):
 - A new game saved by the original imports and exports back byte for byte.

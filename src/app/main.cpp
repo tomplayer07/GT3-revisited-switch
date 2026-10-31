@@ -3,6 +3,7 @@
 
 #define SDL_MAIN_USE_CALLBACKS 1
 #include "app/app.h"
+#include "app/launch_help.h"
 
 #include <SDL3/SDL_main.h>
 
@@ -40,6 +41,11 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char** argv) {
 
     SDL_SetLogOutputFunction(switch_log_callback, nullptr);
 #endif
+
+    if (gt3r::wants_launch_help(argc, argv)) { // before SDL starts: no window
+        gt3r::print_launch_help();
+        return SDL_APP_SUCCESS;
+    }
 
     try {
         printf("Instantiating App...\n");

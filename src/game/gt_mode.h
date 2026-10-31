@@ -126,6 +126,11 @@ public:
     // or the NTSC-J disc's file, which has no such key) the program's built-in default, read
     // from CORE.GT3 (the kanji for prize money in every release).
     std::string prize_prefix;
+    // The part names of the setting menu's part rows (gt_mode §14), game text by slot of the
+    // realtime text group DATABASEPARTS ("PTEXT_MUFFLER_1" -> "Muffler/Sports"): the language's
+    // text/realtime.dat value, else the program's built-in default (the NTSC-J disc's file
+    // lacks 26 of the 80 slots).
+    std::map<std::string, std::string> part_texts;
     const PrizeSet* prize_set(const std::string& name) const;
     // A prize candidate as the car_get roll sees it in the game's language (docs/dev/GT_MODE.md "Language",
     // prize_car_label): a swapped label has no fixed colour.
@@ -268,6 +273,12 @@ public:
     Check can_sell(int index) const;
     s64 sell_car(int index);
     void ride(int index);
+    // The save editor's garage (game/save_edit.h), outside the game's rules: a stock car as a
+    // dealer sells it (paint index clamped to the model's list), not paid for and not counted
+    // as a prize; the first car becomes the ride car. -1 when the garage is full or the car
+    // unknown. remove_car takes a car out without selling it (the ride car leaves none).
+    int add_car(const std::string& car, int paint);
+    void remove_car(int index);
     // A fresh garage car with stock parts and settings (not added).
     std::optional<GarageCar> make_car(const std::string& car) const;
 

@@ -1055,6 +1055,49 @@ TEST(gtmode_disc_ps2_save_by_region) {
     CHECK(std::any_of(files.begin(), files.end(), [](const Ps2SaveFile& f) { return f.name == "BESCES-50294GAMEDATA"; }));
 }
 
+// Any disc through its Vfs (as gt3tool save-export / save-import read it): the save is the
+// disc release's own (card folder, GAMEDATA minor version, language word +0xC8 in each of
+// its languages, which the original starts in), as a card image and as a folder card, and
+// imports back.
+TEST(gtmode_disc_ps2_save_own_release) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    Vfs vfs(&disc->volume());
+    const RegionData rd = vfs.region();
+    const GtData::Reader read = [&](const std::string& p) { return vfs.read(p); };
+    const std::string dir = rd.region == Region::Japan    ? "BISCPS-15009GAMEDATA"
+                            : rd.region == Region::Europe ? "BESCES-50294GAMEDATA"
+                                                          : "BASCUS-97102GAMEDATA";
+    const u16 minor = rd.region == Region::Japan ? 0 : rd.region == Region::Europe ? 2 : 1;
+    namespace fs = std::filesystem;
+    const fs::path out = test::temp_dir("ps2_own_release");
+    for (Language lang : rd.languages()) {
+        vfs.set_language(lang);
+        auto data = std::make_shared<GtData>();
+        CHECK(data->load(read) && data->region == rd.region && data->language == lang);
+        GtMode gt(data);
+        gt.state().credits = 10000000;
+        CHECK(gt.buy_car("r34_gtr_v_99") >= 0);
+        const std::string card = (out / "game.ps2").string();
+        export_ps2_save_path(gt.state(), data, read, card);
+        std::optional<Bytes> image = read_host_file(card);
+        const std::vector<ps2::McDir> dirs = image ? ps2::read_card(*image) : std::vector<ps2::McDir>{};
+        CHECK(dirs.size() == 1 && dirs[0].name == dir);
+        const ps2::McFile* file = nullptr;
+        for (const ps2::McDir& d : dirs)
+            for (const ps2::McFile& f : d.files)
+                if (f.name == dir) file = &f;
+        CHECK(file && rd16(file->data, 8) == minor &&
+              rd32(ps2_payload(file->data), 0xC8) == (rd.region == Region::Japan ? 0 : u32(lang)));
+        GameState s = import_ps2_save_path(card, *data);
+        CHECK(s.credits == gt.state().credits && s.garage.size() == 1 && s.garage[0].car == "r34_gtr_v_99");
+        const fs::path folder = out / "card";
+        export_ps2_save_path(gt.state(), data, read, folder.string());
+        CHECK(fs::exists(folder / dir / dir) && import_ps2_save_path(folder.string(), *data).credits == gt.state().credits);
+    }
+    fs::remove_all(out);
+}
+
 TEST(gtmode_disc_ps2_rankings_and_options) {
     NEED_DATA();
     GtMode gt(data);
@@ -1367,6 +1410,53 @@ TEST(gtmode_disc_setting_files) {
     CHECK(back.car == car.car && back.parts == gt.state().setting_files.back().parts);
     CHECK(back.settings.spring == gt.state().setting_files.back().settings.spring);
     CHECK(back.ref_final == gt.state().setting_files.back().ref_final);
+}
+
+// The change-parts rows (gt_mode §14, public issue 86): each slot's fitted part by the
+// program's goods texts; the turbo, intercooler, driveshaft and AYC rows by the car; the tyre
+// rows on a dirt event the dirt tyres when owned.
+TEST(gtmode_disc_change_parts_rows) {
+    NEED_DATA();
+    GtMode gt(data);
+    auto pt = [&](const char* slot) {
+        auto it = data->part_texts.find(std::string("PTEXT_") + slot);
+        return it != data->part_texts.end() ? it->second : std::string("?");
+    };
+    auto row = [&](const GarageCar& c, const char* cls, bool dirt = false) {
+        return setting_parts_text(gt, &c, cls, dirt).value_or("(none)");
+    };
+    std::optional<GarageCar> evo = gt.make_car("lancer_evo6_tommi_gsr_opt_00"), vitz = gt.make_car("vitz_euro_00");
+    CHECK(evo && vitz);
+    if (!evo || !vitz) return;
+    // The issue's Lancer Evolution VI (4WD, turbo) as it comes, then tuned.
+    CHECK(row(*evo, "parts_eng_muffler") == pt("NORMAL") && row(*evo, "parts_eng_computer") == pt("COMPUTER_NORMAL"));
+    CHECK(row(*evo, "parts_eng_na_tune") == pt("NOTHING") && row(*evo, "parts_eng_port_polish") == pt("NO_MODIFY"));
+    CHECK(row(*evo, "parts_eng_turbine") == pt("NORMAL") && row(*evo, "parts_eng_inter_cooler") == pt("NORMAL"));
+    CHECK(row(*evo, "parts_drv_shaft") == pt("NORMAL") && row(*evo, "parts_oth_ayc_s") == pt("NOTHING"));
+    CHECK(row(*evo, "parts_sus_s_kit") == pt("NORMAL") && row(*evo, "parts_oth_weight_r") == pt("NO_MODIFY"));
+    for (int g : {39, 9, 45, 35, 81, 25, 53, 28})
+        CHECK(gt.fit_goods(*evo, g));
+    CHECK(row(*evo, "parts_eng_muffler") == pt("MUFFLER_3") && row(*evo, "parts_eng_computer") == pt("COMPUTER_SPORTS"));
+    CHECK(row(*evo, "parts_eng_port_polish") == pt("MODIFY") && row(*evo, "parts_drv_lsd") == pt("LSD_5"));
+    CHECK(row(*evo, "parts_oth_ayc_s") == pt("EQUIP") && row(*evo, "parts_eng_turbine") == pt("STAGE_3"));
+    CHECK(row(*evo, "parts_eng_inter_cooler") == pt("INTERCOOLER_2") && row(*evo, "parts_sus_s_kit") == pt("SUSPENSION_3"));
+    CHECK(row(*evo, "parts_oth_weight_r") == pt("STAGE_2"));
+    // The Vitz (FF, NA): no driveshaft, no intercooler without a turbo, the turbo "N/A" until a kit.
+    CHECK(row(*vitz, "parts_drv_shaft") == pt("NO_EQUIP") && row(*vitz, "parts_eng_inter_cooler") == pt("NO_EQUIP"));
+    CHECK(row(*vitz, "parts_eng_turbine") == pt("NOTHING"));
+    CHECK(gt.fit_goods(*vitz, 79));
+    CHECK(row(*vitz, "parts_eng_turbine") == pt("STAGE_1") && row(*vitz, "parts_eng_inter_cooler") == pt("NORMAL"));
+    // Tyres; on a dirt event the dirt tyres when owned, else "----".
+    CHECK(row(*vitz, "parts_tir_f") == pt("TIRE_NORMAL") && row(*vitz, "parts_tir_r") == pt("TIRE_NORMAL"));
+    CHECK(gt.fit_goods(*vitz, 63));
+    CHECK(row(*vitz, "parts_tir_f") == pt("TIRE_SOFT") && row(*vitz, "parts_tir_r") == pt("TIRE_SOFT"));
+    CHECK(row(*vitz, "parts_tir_f", true) == "----" && row(*vitz, "parts_tir_r", true) == "----");
+    vitz->owned.set(66);
+    CHECK(row(*vitz, "parts_tir_f", true) == pt("TIRE_DIRT") && row(*vitz, "parts_tir_r", true) == pt("TIRE_DIRT"));
+    CHECK(setting_parts_text(gt, nullptr, "parts_eng_muffler", false) == "----");
+    CHECK(!setting_parts_text(gt, &*vitz, "spring_rate_f", false));
+    if (data->language == Language::US)
+        CHECK(row(*evo, "parts_eng_muffler") == "Muffler/Racing" && pt("NOTHING") == "N/A" && pt("MODIFY") == "Installed");
 }
 
 // --- Arcade progression (gt_mode §16) ---------------------------------------------------
