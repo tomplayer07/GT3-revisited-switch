@@ -25,6 +25,36 @@ ModelStats model_stats(const scene::Model& model, int lod) {
 
 namespace {
 
+static bool primitives_compatible(const scene::Primitive& a, const scene::Primitive& b) {
+    if (a.texture != b.texture) return false;
+    if (a.flags != b.flags) return false;
+    if (a.alpha_ref != b.alpha_ref) return false;
+    if (a.env_rows != b.env_rows) return false;
+    if (a.env_kind != b.env_kind) return false;
+    if (a.env_point != b.env_point) return false;
+    if (a.material.valid != b.material.valid) return false;
+    if (a.material.valid) {
+        if (a.material.shininess != b.material.shininess ||
+            a.material.scale != b.material.scale ||
+            a.material.specular_local != b.material.specular_local) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (a.material.ambient[i] != b.material.ambient[i] ||
+                a.material.diffuse[i] != b.material.diffuse[i] ||
+                a.material.specular[i] != b.material.specular[i] ||
+                a.material.emission[i] != b.material.emission[i] ||
+                a.material.lamp_emission[i] != b.material.lamp_emission[i]) return false;
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (a.env_c0[i] != b.env_c0[i] || a.env_c1[i] != b.env_c1[i] ||
+            a.env_point_pos[i] != b.env_point_pos[i]) return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (a.env_alpha[i] != b.env_alpha[i]) return false;
+    }
+    return true;
+}
+
 // Meshes -> one vertex and one index list, per-mesh draw info; `lines`: wireframe edge lists.
 void assemble(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool lines,
               std::vector<scene::Vertex>& vertices, std::vector<u32>& indices, std::vector<GpuModel::MeshInfo>& out) {
@@ -50,19 +80,68 @@ void assemble(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool
         }
         u32 nv = u32(m.vertices.size());
         // Drop out-of-range indices instead of letting the GPU read garbage.
+        struct ExtractedPrim {
+            scene::Primitive prim;
+            std::vector<u32> indices;
+        };
+        std::vector<ExtractedPrim> extracted;
+        extracted.reserve(m.primitives.size());
+
         for (const scene::Primitive& p : m.primitives) {
-            scene::Primitive q = p;
-            q.first_index = u32(indices.size()) - info.index_offset;
+            ExtractedPrim ep;
+            ep.prim = p;
             u32 end = std::min<u32>(p.first_index + p.index_count, u32(m.indices.size()));
             u32 tri_end = p.first_index + (end > p.first_index ? (end - p.first_index) / 3 * 3 : 0);
             for (u32 i = p.first_index; i < tri_end; i += 3) {
                 u32 a = m.indices[i], b = m.indices[i + 1], c = m.indices[i + 2];
                 if (a >= nv || b >= nv || c >= nv) continue;
-                indices.insert(indices.end(), {a, b, c});
+                ep.indices.insert(ep.indices.end(), {a, b, c});
             }
-            q.index_count = u32(indices.size()) - info.index_offset - q.first_index;
-            if (q.texture >= int(texture_count)) q.texture = -1;
-            if (q.index_count) info.primitives.push_back(q);
+            ep.prim.index_count = u32(ep.indices.size());
+            if (ep.prim.texture >= int(texture_count)) ep.prim.texture = -1;
+            if (ep.prim.index_count > 0) {
+                extracted.push_back(std::move(ep));
+            }
+        }
+
+        constexpr u32 kNonOpaqueMask = scene::kAlphaBlend | scene::kAdditive | 
+                                      scene::kMultiplyDest | scene::kAlphaOnly | 
+                                      scene::kDestAlphaAdd | scene::kAlphaFailBlend | 
+                                      scene::kNoDepthWrite;
+
+        std::vector<ExtractedPrim> merged;
+        merged.reserve(extracted.size());
+
+        for (auto& ep : extracted) {
+            bool is_opaque = (ep.prim.flags & kNonOpaqueMask) == 0;
+            if (is_opaque) {
+                bool combined = false;
+                for (auto& existing : merged) {
+                    bool existing_opaque = (existing.prim.flags & kNonOpaqueMask) == 0;
+                    if (existing_opaque && primitives_compatible(existing.prim, ep.prim)) {
+                        existing.indices.insert(existing.indices.end(), ep.indices.begin(), ep.indices.end());
+                        existing.prim.index_count += ep.prim.index_count;
+                        combined = true;
+                        break;
+                    }
+                }
+                if (!combined) {
+                    merged.push_back(std::move(ep));
+                }
+            } else {
+                if (!merged.empty() && primitives_compatible(merged.back().prim, ep.prim)) {
+                    merged.back().indices.insert(merged.back().indices.end(), ep.indices.begin(), ep.indices.end());
+                    merged.back().prim.index_count += ep.prim.index_count;
+                } else {
+                    merged.push_back(std::move(ep));
+                }
+            }
+        }
+
+        for (auto& mp : merged) {
+            mp.prim.first_index = u32(indices.size()) - info.index_offset;
+            indices.insert(indices.end(), mp.indices.begin(), mp.indices.end());
+            info.primitives.push_back(mp.prim);
         }
         // Unique edges for the wireframe view.
         info.line_first = u32(indices.size()) - info.index_offset;

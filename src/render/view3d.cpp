@@ -1588,6 +1588,8 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
     VertexLighting prev_vl{};
     FragmentUniforms prev_fu{};
     bool prev_fu_valid = false;
+    bool prev_vu_valid = false;
+    VertexUniforms prev_vu{};
 
     const DrawItem* prev_item = nullptr;
     FragmentUniforms base_item_fu = base_fu;
@@ -1634,8 +1636,12 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
         for (int i = 0; i < 4; ++i) vu.view_z[i] = view.at(2, i);
         vu.fog[0] = opt.fog_start, vu.fog[1] = opt.fog_max, vu.fog[2] = opt.fog_gt3 ? 1.0f : 0.0f;
 
-        glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert());
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vu), &vu);
+        if (!prev_vu_valid || std::memcmp(&vu, &prev_vu, sizeof(vu)) != 0) {
+            glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert());
+            glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vu), &vu);
+            prev_vu = vu;
+            prev_vu_valid = true;
+        }
 
         if (v.item != prev_item) {
             prev_item = v.item;
