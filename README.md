@@ -65,8 +65,39 @@ This fork brings native Nintendo Switch support to *GT3 Revisited*, compiling di
 
 ### Current Status
 - **Playable**: Yes, the entire game (GT Mode, Arcade, License Tests, Replays, Replay Theater, Audio, Saves).
-- **Daytime Tracks**: **Solid 60 FPS** (16.6 ms) on tracks like Super Speedway, Circuit di Roma, Trial Mountain with recommended overclock.
-- **Night Tracks (WIP / Help Wanted)**: Tracks with hundreds of dynamic street lamps and dense city structures (Special Stage Route 5, Route 11) run at ~25–35 FPS. The CPU software raycast occluder and draw call count are the current bottlenecks. Anyone interested in helping optimize the occluder or implement GPU depth testing on Switch is very welcome!
+- **Daytime Tracks**: **Solid 60 FPS** (16.6 ms) on tracks like Tokyo R246, Super Speedway, Circuit di Roma, Trial Mountain with recommended overclock.
+- **Night Tracks (WIP / Help Wanted)**: Dense city tracks with dynamic street lamps (Special Stage Route 5, Route 11) run at ~25–38 FPS. See below for details on profiling and optimization attempts.
+
+### 🛠️ Optimization Attempts & Findings (For Contributors)
+
+To help future contributors understand what has already been tried and where the current bottlenecks lie, here is a summary of the optimizations implemented in this fork:
+
+1. **Primitive Batching & Deduplication (`src/render/gpu_model.cpp`)**:
+   - **Problem**: In the original PS2 engine, models are split into tiny micro-memory chunks (20–40 triangles each). This caused tracks like Tokyo R246 to issue over **2,960 draw calls** per frame, choking the CPU command processor and pushing `scene draw (CPU)` to 17.7 ms (exceeding the whole 16.6 ms frame budget).
+   - **Optimization**: Implemented an automated batching step in `assemble()` that groups and merges contiguous opaque primitives sharing the exact same texture, material, and shader pipeline state into a single contiguous index range.
+   - **Result**: Cut draw calls by up to 80% (from ~3,000 down to 400–600 calls per frame), bringing CPU draw time down to 6–7 ms and locking daytime tracks (Tokyo R246, Roma, etc.) to **solid 60 FPS**.
+
+2. **UBO Caching (`src/render/view3d.cpp`)**:
+   - **Problem**: Calling `glBufferSubData` at offset 0 of the vertex uniform buffer (`VertexUniforms`) for every single mesh (over 190 times a frame) caused continuous CPU-GPU pipeline stalls in Mesa.
+   - **Optimization**: Added a state cache for `VertexUniforms`. The UBO is now only uploaded when the model transform or fog configuration actually changes. Static track scenery meshes now share the same uniform upload.
+
+3. **Double-Rendering Simplification for Wet Road (`src/race/wet_road.cpp`)**:
+   - **Problem**: Wet tracks like Route 5 duplicate the entire 3D course scenery upside-down in an offscreen FBO (+ blur pass) to simulate road surface reflections, forcing the Tegra X1 GPU to render the course twice every frame.
+   - **Optimization**: On Switch, the inverted scenery geometry is skipped while preserving the car lamp reflection streaks on the wet pavement. If no light streaks are visible, offscreen FBO switching and blur passes are skipped entirely.
+
+4. **Differentiated Car Shadows at Night (`src/app/screen_race_render.cpp`)**:
+   - **Problem**: Point-light night courses cast up to 4 dynamic lamp shadows per vehicle (24 shadow passes per frame with 6 cars).
+   - **Optimization**: The player's car keeps all 4 realistic lamp shadows, while AI opponent cars cast only 1 shadow (from the primary light source), eliminating 15 transparent blending passes per frame in crowded races.
+
+5. **Street Lamp Occlusion & Distance Culling (`src/race/lamp_glows.cpp`)**:
+   - **Problem**: Over 280 point lamps and flares were evaluated every frame with BVH occluder raycasts and 2D sprite blending.
+   - **Optimization**: Simplified occlusion tests on Switch and culled lamp halos/glows beyond 450 meters.
+
+#### 💡 Open Areas for Further Optimization (Help Wanted!)
+If you are an experienced Switch homebrew or graphics developer:
+- **Point-Light Mode / Shaders**: On night courses (`point_lights_`), vertex and fragment shaders compute quadratic light attenuation for multiple lights. Adding a Switch-specific flat/directional night lighting mode could instantly push Route 5 to 60 FPS.
+- **VSync & Frame Pacing**: The Switch display uses FIFO double-buffering. When a frame takes 17 ms (just 0.4 ms over the 16.6 ms target), the framerate drops immediately to 30 FPS. Adaptive VSync or triple buffering could help maintain 50+ FPS instead of dropping to 30 FPS.
+- **Native `deko3d` Backend**: Replacing the Mesa OpenGL ES 3.0 translation layer with a native `deko3d` or raw Tegra backend would drastically reduce driver overhead.
 
 ### Installation on Switch
 1. Download or compile `gt3r.nro`.
