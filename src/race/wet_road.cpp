@@ -150,7 +150,9 @@ bool WetRoad::load(render::GpuContext& ctx, const Vfs& vfs, ByteSpan course, Byt
 void WetRoad::add_buffer_items(std::vector<render::DrawItem>& items, const render::Mat4& view, const render::Vec3& eye,
                                const std::vector<Car>& cars) {
     if (!reflection_) return;
+#if !defined(__SWITCH__)
     items.push_back({reflection_.get(), {}, 0});
+#endif
     if (!streaks_) return;
     // Eye-space basis (view rows: right, up, back).
     render::Vec3 right{view.at(0, 0), view.at(0, 1), view.at(0, 2)}, up{view.at(1, 0), view.at(1, 1), view.at(1, 2)},
@@ -224,7 +226,7 @@ render::DrawOptions WetRoad::buffer_options(const render::DrawOptions& main) con
 SDL_GPUTexture* WetRoad::render(render::View3D& v, const render::Mat4& view, const render::Mat4& proj,
                                 const render::Vec3& eye, const std::vector<render::DrawItem>& items,
                                 const render::DrawOptions& main) {
-    if (!reflection_) return nullptr;
+    if (!reflection_ || items.empty()) return nullptr;
     SDL_GPUTexture* t = v.render_offscreen(0, p_.width, p_.height, view, proj, eye, items, buffer_options(main));
     if (!t) return nullptr;
     render::DrawOptions bo;

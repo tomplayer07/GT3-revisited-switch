@@ -286,7 +286,12 @@ void LampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Mat4&
             const LampType& ty = types_[size_t(l.type)];
             render::Vec3 v = to_view(view, l.pos);
             float z = -v.z;
+#if defined(__SWITCH__)
+            constexpr float kSwitchMaxDist = 450.0f;
+            if (z <= 0 || z > std::min(ty.max_dist, kSwitchMaxDist)) continue;
+#else
             if (z <= 0 || z > ty.max_dist) continue;
+#endif
             // On screen: the square of the halo size around the lamp (not the glow size).
             float px = fr.screen_x(v.x, z, rect.x, rect.w), py = fr.screen_y(v.y, z, rect.y, rect.h);
             float hr = ty.halo * fr.per_metre(z, rect.h);
@@ -424,7 +429,12 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
         render::Vec3 tp = car.model.transform_point(l.test);
         render::Vec3 tv = to_view(view, tp);
         float tz = -tv.z;
+#if defined(__SWITCH__)
+        constexpr float kSwitchMaxDist = 450.0f;
+        if (tz <= 0 || tz > std::min(ty.max_dist, kSwitchMaxDist)) return;
+#else
         if (tz <= 0 || tz > ty.max_dist) return;
+#endif
         float tpx = fr.screen_x(tv.x, tz, rect.x, rect.w), tpy = fr.screen_y(tv.y, tz, rect.y, rect.h);
         float hr = ty.halo * std::max(l.a, l.b) * fr.per_metre(tz, rect.h);
         if (tpx - hr > rect.x + rect.w || tpx + hr < rect.x || tpy - hr > rect.y + rect.h || tpy + hr < rect.y) return;

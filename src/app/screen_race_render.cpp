@@ -200,7 +200,11 @@ CarLook RaceScreen::car_look(const sim::VehicleState& s, bool player, size_t slo
             look.lamp_shear[k] = render::Vec3{-l.dir.x, 0, -l.dir.z} * e.shadow_len;
             look.lamp_alpha[k] = t.shadow_alpha * l.w;
         }
+#if defined(__SWITCH__)
+        look.lamp_shadows = player ? il.count : std::min(il.count, 1);
+#else
         look.lamp_shadows = il.count;
+#endif
         if (il.count > 0) look.lights = &il;
     } else if (rt && e.has_env) {
         float a = 0, b = 0;
