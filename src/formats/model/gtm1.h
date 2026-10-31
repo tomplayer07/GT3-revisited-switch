@@ -307,7 +307,7 @@ public:
     // The animators' start values (the game: at load and with every run).
     void reset();
     // Advances the animators by `seconds` (the game: 1/60 s per frame).
-    void update(float seconds);
+    bool update(float seconds); // true when an effective operand changed
     // The operand values the animators write now, by operand offset in the block.
     const std::map<u32, u32>& operands() const { return operands_; }
 

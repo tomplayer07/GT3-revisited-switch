@@ -1,4 +1,5 @@
 #include "race/race_scene.h"
+#include "base/render_profile.h"
 
 #include "base/log.h"
 #include "formats/course/course_model.h"
@@ -212,8 +213,10 @@ void CourseScene::restart_animations(float countdown) {
 void CourseScene::animate(float seconds) {
     cluts_.animate(seconds);
     for (Moving* m : {&scenery_moving_, &backdrop_moving_})
-        for (gtm1::AnimatedNodes& a : m->nodes) a.update(seconds);
-    moving_changed_ = moving_changed_ || seconds != 0;
+        for (gtm1::AnimatedNodes& a : m->nodes) {
+            const bool changed = a.update(seconds); // always advance every animator
+            moving_changed_ = moving_changed_ || changed;
+        }
 }
 
 void CourseScene::upload_animations() {
@@ -223,9 +226,12 @@ void CourseScene::upload_animations() {
     for (Moving* m : {&scenery_moving_, &backdrop_moving_}) {
         if (!m->gpu) continue;
         std::vector<scene::Mesh> meshes;
-        for (const gtm1::AnimatedNodes& a : m->nodes) {
-            std::vector<scene::Mesh> part = a.meshes();
-            for (scene::Mesh& mesh : part) meshes.push_back(std::move(mesh));
+        {
+            render_profile::Scope measure(render_profile::frame.moving);
+            for (const gtm1::AnimatedNodes& a : m->nodes) {
+                std::vector<scene::Mesh> part = a.meshes();
+                for (scene::Mesh& mesh : part) meshes.push_back(std::move(mesh));
+            }
         }
         m->gpu->update_geometry(meshes);
     }
@@ -320,6 +326,8 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
                 }
             }
     }
+    lamp_occluder_.add_opaque_body(body);
+    lamp_occluder_.build(0.5f); // local car coordinates; built once, transformed rays each frame
     body_ = std::make_unique<render::GpuModel>(ctx, body);
     if (!morphs_.empty()) {
         scene::Model mm; // the textures the morph parts use, then their meshes at the defaults

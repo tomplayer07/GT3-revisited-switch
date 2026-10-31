@@ -1,4 +1,5 @@
 #include "race/clut_animations.h"
+#include "base/render_profile.h"
 
 namespace gt3r::race {
 
@@ -22,8 +23,11 @@ void ClutAnimations::animate(float seconds) {
 void ClutAnimations::upload() {
     for (Model& m : models_) {
         std::vector<render::GpuModel::TextureUpdate> updates;
-        for (gtm1::ClutSet& s : m.sets)
-            for (u32 r : s.textures.refresh()) updates.push_back({size_t(s.first) + r, s.textures.rgba(r)});
+        {
+            render_profile::Scope measure(render_profile::frame.palettes);
+            for (gtm1::ClutSet& s : m.sets)
+                for (u32 r : s.textures.refresh()) updates.push_back({size_t(s.first) + r, s.textures.rgba(r)});
+        }
         if (!updates.empty()) m.gpu->update_textures(updates);
     }
 }

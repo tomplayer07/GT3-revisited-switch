@@ -226,7 +226,8 @@ TEST(gtm1_animated_nodes_synthetic) {
     if (a.size() != 2) return;
     CHECK((vertex(a, 0, 1) == std::array<float, 3>{1, 0, 0}) && (vertex(a, 1, 1) == std::array<float, 3>{1, 0, 0}));
 
-    an.update(1.0f); // 90 deg, phase 0.5 -> chunk 1; flip-book 1 -> chunk 1
+    CHECK(!an.update(0.0f)); // no operand change: no moving-geometry rebuild needed
+    CHECK(an.update(1.0f)); // 90 deg, phase 0.5 -> chunk 1; flip-book 1 -> chunk 1
     CHECK(an.operands().at(0xB5) == 1);
     std::vector<scene::Mesh> b = an.meshes();
     CHECK(b.size() == 2);

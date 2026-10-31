@@ -1,6 +1,7 @@
 #include "render/gpu_context.h"
 
 #include "base/log.h"
+#include "base/render_profile.h"
 #include "platform/render_scale.h"
 #include "render/shaders/generated/model_frag.h"
 #include "render/shaders/generated/model_vert.h"
@@ -56,6 +57,12 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
         return false;
     }
     SDL_SetRenderVSync(renderer_, options.vsync ? 1 : 0);
+
+    LOG_INFO("Switch GL: vendor %s, renderer %s, version %s; SDL %s, vsync %d",
+             reinterpret_cast<const char*>(glGetString(GL_VENDOR)),
+             reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
+             reinterpret_cast<const char*>(glGetString(GL_VERSION)), SDL_GetRendererName(renderer_), int(options.vsync));
+    gl_profile_.init(options.switch_profile);
 
     // Compile GLES3 shaders
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -116,6 +123,16 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
     if (loc_env >= 0) glUniform1i(loc_env, 1);
     if (loc_sph >= 0) glUniform1i(loc_sph, 2);
     glUseProgram(0);
+
+    gl_freeze_textures_ = options.switch_profile && options.switch_freeze_textures;
+    LOG_INFO("Switch diagnostic frozen texture updates: %s", gl_freeze_textures_ ? "on" : "off");
+    gl_texture_rotate_ = options.switch_texture_rotate;
+    LOG_INFO("Switch animated texture rotation: %s", gl_texture_rotate_ ? "3 images" : "off");
+    gl_texture_stream_ = options.switch_texture_stream;
+    LOG_INFO("Switch animated texture uploads: %s", gl_texture_stream_ ? "PBO batches" : "direct");
+    gl_uniform_stream_ = options.switch_uniform_stream;
+    glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &gl_ubo_align_);
+    LOG_INFO("Switch uniform uploads: %s, alignment %d", gl_uniform_stream_ ? "stream" : "legacy", gl_ubo_align_);
 
     // Create UBOs
     glGenBuffers(1, &gl_ubo_vert_);
@@ -270,6 +287,8 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
 
 GpuContext::~GpuContext() {
 #if defined(__SWITCH__)
+    gl_profile_.release();
+    if (gl_texture_pbo_) glDeleteBuffers(1, &gl_texture_pbo_);
     if (gl_program_) { glDeleteProgram(gl_program_); gl_program_ = 0; }
     if (gl_ubo_vert_) { glDeleteBuffers(1, &gl_ubo_vert_); gl_ubo_vert_ = 0; }
     if (gl_ubo_vert_lit_) { glDeleteBuffers(1, &gl_ubo_vert_lit_); gl_ubo_vert_lit_ = 0; }
@@ -456,6 +475,7 @@ std::vector<PipelineKey> warm_keys() {
 } // namespace
 
 void GpuContext::warm_pipelines() {
+    if (!device_) return; // The Switch GLES backend has no SDL_GPU pipelines.
     stop_warming();
     warm_ = true;
     warm_stop_ = false;
@@ -702,6 +722,59 @@ void note_gpu_submits(SDL_GPUDevice* device, u32 submits, u64 bytes) {
 
 void GpuContext::frame_presented() { pending_gpu_work().frame_presented(); }
 
+#if defined(__SWITCH__)
+void GpuContext::upload_gl_textures(const TextureUploadBatch& batch) {
+    if (batch.images().empty()) return;
+    render_profile::Scope measure(render_profile::frame.textures);
+    GLint previous_pbo = 0, alignment = 0, row_length = 0, skip_rows = 0, skip_pixels = 0;
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &previous_pbo);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+    glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    if (!gl_texture_pbo_) glGenBuffers(1, &gl_texture_pbo_);
+    {
+        render_profile::Scope stage_measure(render_profile::frame.texture_stage);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, gl_texture_pbo_);
+        // Rename the store on every batch: earlier frames can keep consuming their
+        // bytes while the CPU supplies the next images, without overwriting them.
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, GLsizeiptr(batch.size()), nullptr, GL_STREAM_DRAW);
+        glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, GLsizeiptr(batch.size()), batch.data());
+    }
+    if (render_profile::enabled) {
+        ++render_profile::frame.texture_batches;
+        render_profile::frame.texture_batch_bytes += batch.size();
+    }
+    {
+        render_profile::Scope commands_measure(render_profile::frame.texture_commands);
+        for (const auto& image : batch.images()) {
+            if (render_profile::enabled) {
+                ++render_profile::frame.texture_updates;
+                render_profile::frame.texture_bytes += size_t(image.width) * image.height * 4;
+            }
+            glBindTexture(GL_TEXTURE_2D, image.texture);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, GLsizei(image.width), GLsizei(image.height),
+                            GL_RGBA, GL_UNSIGNED_BYTE, reinterpret_cast<const void*>(image.offset));
+            if (image.mipmaps) {
+                render_profile::Scope mip_measure(render_profile::frame.mipmaps);
+                if (render_profile::enabled) ++render_profile::frame.mipmap_calls;
+                glGenerateMipmap(GL_TEXTURE_2D);
+            }
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, GLuint(previous_pbo));
+    glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, skip_rows);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, skip_pixels);
+}
+#endif
+
 Uploader::Uploader(SDL_GPUDevice* device) : device_(device) {}
 
 u32 Uploader::stage(const void* data, u32 size) {
@@ -791,10 +864,17 @@ SDL_GPUTexture* Uploader::texture_rgba(u32 w, u32 h, const u32* rgba, bool mipma
 
 void Uploader::update_rgba(SDL_GPUTexture* tex, u32 w, u32 h, const u32* rgba, bool mipmaps, bool cycle) {
 #if defined(__SWITCH__)
+    render_profile::Scope measure(render_profile::frame.textures);
+    if (render_profile::enabled) {
+        ++render_profile::frame.texture_updates;
+        render_profile::frame.texture_bytes += size_t(w) * h * 4;
+    }
     GLuint gl_tex = (GLuint)(uintptr_t)tex;
     glBindTexture(GL_TEXTURE_2D, gl_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     if (mipmaps) {
+        render_profile::Scope mip_measure(render_profile::frame.mipmaps);
+        if (render_profile::enabled) ++render_profile::frame.mipmap_calls;
         glGenerateMipmap(GL_TEXTURE_2D);
     }
     glBindTexture(GL_TEXTURE_2D, 0);

@@ -1,9 +1,11 @@
 #include "app/app.h"
 #include "base/hitch.h"
+#include "base/render_profile.h"
 #include "app/screen_registry.h"
 #include "app/updates.h"
 
 #include "base/log.h"
+#include "base/deferred_log.h"
 #include "disc/region.h"
 #include "gt3r_version.h"
 #include "formats/png_writer.h"
@@ -82,6 +84,11 @@ bool App::init(int argc, char** argv) {
     SDL_CreateDirectory(mods_dir().c_str());
     config_path_ = data_dir_ + "config.ini";
     if (auto cfg = IniDocument::load(config_path_)) config_ = std::move(*cfg);
+#if defined(__SWITCH__)
+    const bool defer_logs = config_.get("video", "switch_defer_logs").value_or("on") != "off";
+    log_defer_diagnostics(defer_logs);
+    LOG_INFO("Switch periodic diagnostics: %s", defer_logs ? "RAM buffer, flush on race/app exit" : "immediate SD writes");
+#endif
     // iOS: the remembered disc images readable again (another install's folder, picked files).
     if (platform::restore_disc_access(config_, data_dir_) && !config_.save(config_path_))
         LOG_WARN("Could not save %s", config_path_.c_str());
@@ -129,6 +136,11 @@ bool App::init(int argc, char** argv) {
     // backend) and no 3D. [video] gpu=0 or --no-gpu forces the fallback.
     render::GpuOptions gpu_opts;
     bool use_gpu = config_.get("video", "gpu").value_or("1") != "0";
+    gpu_opts.switch_uniform_stream = config_.get("video", "switch_uniform_stream").value_or("off") != "off";
+    gpu_opts.switch_freeze_textures = config_.get("video", "switch_freeze_textures").value_or("off") == "on";
+    gpu_opts.switch_texture_rotate = config_.get("video", "switch_texture_rotate").value_or("off") == "on";
+    gpu_opts.switch_texture_stream = config_.get("video", "switch_texture_stream").value_or("off") != "off";
+    gpu_opts.switch_profile = config_.get("video", "switch_profile").value_or("off") == "on";
     gpu_opts.msaa = platform::default_msaa(platform::is_mobile());
     if (auto v = config_.get("video", "msaa")) gpu_opts.msaa = std::atoi(v->c_str());
     if (auto v = config_.get("video", "anisotropy")) gpu_opts.anisotropy = std::atoi(v->c_str());
@@ -649,6 +661,8 @@ SDL_AppResult App::iterate() {
         menu_.update(!modal && top->menu_input_any_device() ? input_->any_device_pad() : input_->menu_pad(), dt);
     else menu_.update(PadState{}, dt);
 
+    render_profile::frame = {};
+    hitch::env_ms = hitch::draw_ms = hitch::collect_ms = hitch::lamps_ms = 0;
     Uint64 h_u0 = SDL_GetTicksNS();
     if (modal) updates().dialog_update(*this);
     else if (top) top->update(*this, dt);
@@ -670,6 +684,9 @@ SDL_AppResult App::iterate() {
 #endif
     const Screen* shown = screens_.empty() ? nullptr : screens_.back().get(); // (after this frame's changes)
     layout_ui(shown && shown->adaptive_ui(), shown && shown->follows_aspect());
+#if defined(__SWITCH__)
+    if (gpu_) gpu_->gl_profile().begin();
+#endif
     ui_->clear();
     Uint64 h_r0 = SDL_GetTicksNS();
     if (!screens_.empty()) screens_.back()->render(*this, *ui_);
@@ -723,10 +740,17 @@ SDL_AppResult App::iterate() {
         SDL_CreateDirectory(dir.c_str());
         save_screenshot(dir + "/gt3r-" + std::to_string(SDL_GetTicks()) + ".png");
     }
+#if defined(__SWITCH__)
+    if (gpu_) gpu_->gl_profile().end(renderer_);
+#endif
     const Uint64 present_start = SDL_GetTicksNS();
     SDL_RenderPresent(renderer_);
     if (gpu_) gpu_->frame_presented();
     const double present_ms = double(SDL_GetTicksNS() - present_start) / 1e6;
+#if defined(__SWITCH__)
+    if (gpu_) gpu_->gl_profile().present(frame_s * 1000.0, double(h_u1 - h_u0) / 1e6,
+                                        double(h_r1 - h_r0) / 1e6, present_ms, gpu_->render_scale());
+#endif
     // A lost GPU (Vulkan's VK_ERROR_DEVICE_LOST, which SDL only reports in its error text) never
     // comes back, and the frames that never finish grow the memory by hundreds of MB a second
     // until the system kills us: close with a message instead.

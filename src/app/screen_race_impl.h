@@ -20,6 +20,7 @@
 #include "base/file.h"
 #include "base/log.h"
 #include "base/hitch.h"
+#include "base/render_profile.h"
 #include "formats/model/wheel_spec.h"
 #include "game/gt_mode_menu.h"
 #include "game/gt_save.h"

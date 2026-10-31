@@ -1,3 +1,4 @@
+#include "base/deferred_log.h"
 // The race screen: every race, solo run, replay and demonstration (on the exact core, race/exact_field.h). The
 // race steps at a fixed rate (RaceField::tick_hz) decoupled from the frame rate; rendering interpolates between the last
 // two steps. On its own (--screen race): choose a course and a car, then a time trial.
@@ -329,11 +330,12 @@ void RaceScreen::log_perf(bool force) {
     if (force && perf_.frames > 0) perf_.window = 1e9;
     if (!perf_.roll()) return;
     const render::DrawStats& ds = view_ ? view_->stats() : render::DrawStats{};
-    LOG_INFO("Race perf [%s]: frame %.2f ms avg (%.0f fps), worst %.2f ms; scene draw (CPU) %.2f ms; "
+    LOG_INFO("Race perf [%s]: frame %.2f ms avg (%.0f fps), worst %.2f ms; scene draw (%s) %.2f ms; "
              "%d meshes drawn, %d culled, %d draw calls, %zu triangles; %d voices",
              course_name_.c_str(), perf_.avg_frame, 1000.0 / std::max(perf_.avg_frame, 0.01), perf_.peak_frame,
-             perf_.avg_draw, ds.meshes_drawn, ds.meshes_culled, ds.draw_calls, ds.triangles,
+             preset_.gpusync ? "CPU+GPU sync" : "CPU", perf_.avg_draw, ds.meshes_drawn, ds.meshes_culled, ds.draw_calls, ds.triangles,
              app_ ? app_->audio().voices().active_voices() : 0);
+    if (force) log_flush_diagnostics();
 }
 
 } // namespace gt3r::race_screen

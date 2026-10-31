@@ -1,4 +1,5 @@
 #include "race/lamp_glows.h"
+#include "race/occluder.h"
 
 #include "base/log.h"
 #include "formats/ps2/vif.h"
@@ -418,7 +419,7 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
     std::vector<int> idx;
     int kept = 0;
     // `glow`: head and brake lamps (tail lamps only ever get the halo); `I` the brake factor.
-    auto lamp = [&](const Car& car, const CarLampRecord& l, bool glow, float I) {
+    auto lamp = [&](const Car& car, const CarLampRecord& l, bool glow, float I, const Blocked& occluded) {
 #if defined(__SWITCH__)
         if (kept >= 25) return;
 #else
@@ -468,7 +469,7 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
         float px = fr.screen_x(gv.x, z, rect.x, rect.w), py = fr.screen_y(gv.y, z, rect.y, rect.h);
         float per_m = fr.per_metre(zp, rect.h);
         if (D >= 0) {
-            float vis = box_visibility(tpx, tpy, tz, rect, fr, view, eye, blocked);
+            float vis = box_visibility(tpx, tpy, tz, rect, fr, view, eye, occluded);
             float k = D * I;
             if (vis > 0 && k > 0 && !flare_.empty()) {
                 flare_.add(verts, idx, fr, rect, gv.x * f, gv.y * f, zp, ty.glow * l.a, {col[0] * k, col[1] * k, col[2] * k},
@@ -489,7 +490,7 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
             hx = ty.halo * ((l.a - l.b) * std::fabs(pxv) + l.b) * per_m;
             hy = ty.halo * l.b * per_m;
         }
-        if (ty.halo_gain > 0 && z > 1 && (hx > 0.5f || hy > 0.5f) && !blocked(eye, eye + (car.model.transform_point(l.pos) - eye) * f)) {
+        if (ty.halo_gain > 0 && z > 1 && (hx > 0.5f || hy > 0.5f) && !occluded(eye, eye + (car.model.transform_point(l.pos) - eye) * f)) {
             float k = ty.halo_gain * 0.5f;
             SDL_SetTextureColorMod(disc_, c8(col[0] * k), c8(col[1] * k), c8(col[2] * k));
             SDL_FRect dst{px - hx, py - hy, 2 * hx, 2 * hy};
@@ -498,13 +499,19 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
     };
     for (const Car& car : cars) {
         if (!car.lamps) continue;
-        for (const CarLampRecord& l : car.lamps->head) lamp(car, l, true, 1.0f);
+        const render::Mat4 local = render::inverse(car.model);
+        const render::Vec3 local_eye = local.transform_point(eye);
+        const Blocked occluded = [&](const render::Vec3& from, const render::Vec3& to) {
+            return blocked(from, to) || (car.body && !car.body->empty() &&
+                   car.body->segment_blocked(local_eye, local.transform_point(to)));
+        };
+        for (const CarLampRecord& l : car.lamps->head) lamp(car, l, true, 1.0f, occluded);
         if (car.k > 0)
             for (const CarLampRecord& l : car.lamps->brake) {
                 float I = l.fade ? car.k : (car.brake_now ? 1.0f : 0.0f);
-                if (I > 0) lamp(car, l, true, I);
+                if (I > 0) lamp(car, l, true, I, occluded);
             }
-        for (const CarLampRecord& l : car.lamps->tail) lamp(car, l, false, 1.0f);
+        for (const CarLampRecord& l : car.lamps->tail) lamp(car, l, false, 1.0f, occluded);
     }
     flare_.submit(r, rect, lines, verts, idx);
 }

@@ -310,7 +310,9 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
     if (!ensure_target(renderer, pw, ph)) return;
     used_w_ = pw, used_h_ = ph;
 
+    const Uint64 flush_start = ctx_.gl_profile().enabled() ? SDL_GetTicksNS() : 0;
     SDL_FlushRenderer(renderer);
+    if (flush_start) ctx_.gl_profile().frame.flush_ms += double(SDL_GetTicksNS() - flush_start) / 1e6;
 
     GLint prev_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
@@ -1465,6 +1467,8 @@ SDL_GPUTexture* View3D::render_env_cube(const Vec3& pos, const std::vector<DrawI
 #if defined(__SWITCH__)
 void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
                           const std::vector<DrawItem>& items, const DrawOptions& opt) {
+    const bool profile = ctx_.gl_profile().enabled();
+    const Uint64 prepare_start = profile ? SDL_GetTicksNS() : 0;
     Mat4 view_proj = proj * view;
     float planes[6][4];
     if (opt.frustum_cull) {
@@ -1553,36 +1557,14 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
         }
     }
 
-    static int s_encode_log = 0;
-    if (s_encode_log++ < 3) {
-        LOG_INFO("encode_gles3: items=%zu, vis=%zu, planes=%s", items.size(), vis.size(), opt.frustum_cull ? "true" : "false");
-        for (size_t i = 0; i < vis.size(); ++i) {
-            const Visible& v = vis[i];
-            const GpuModel* model = v.item->model;
-            LOG_INFO("  vis[%zu]: model=%p, vbo=%u, ibo=%u, prims=%zu, voff=%d, ioff=%u",
-                     i, model, (GLuint)(uintptr_t)model->vertex_buffer(), (GLuint)(uintptr_t)model->index_buffer(),
-                     v.mesh->primitives.size(), v.mesh->vertex_offset, v.mesh->index_offset);
-        }
-    }
-
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ctx_.gl_ubo_vert());
-    glBindBufferBase(GL_UNIFORM_BUFFER, 1, ctx_.gl_ubo_vert_lit());
-    glBindBufferBase(GL_UNIFORM_BUFFER, 2, ctx_.gl_ubo_frag());
-
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glEnableVertexAttribArray(2);
-    glEnableVertexAttribArray(3);
-
-    GLuint bound_vbo = 0;
-    GLuint bound_ibo = 0;
-    uintptr_t bound_v_base = UINTPTR_MAX;
-    GLuint bound_tex = 0;
-    GLuint bound_sampler = 0;
-    int bound_cull = -1; // -1: uninit, 0: disabled, 1: back, 2: front
-    int bound_blend = -1; // -1: uninit, 0: disabled, 1: additive, 2: alpha, 3: dest_lerp, 4: dest_add
-    int bound_depth_mask = -1;
-    int bound_color_mask = -1; // -1: uninit, 0: RGBA, 1: Alpha only
+    // Stage every uniform value before issuing draws. GPU ranges remain immutable for
+    // the whole pass, including when a later primitive uses a different material.
+    gl_draws_.clear();
+    for (auto& uniforms : gl_uniforms_) uniforms.clear();
+    std::array<size_t, 3> offsets{};
+    auto stage = [&](int slot, const auto& value) {
+        offsets[size_t(slot)] = gl_uniforms_[slot].append(&value, sizeof(value), size_t(ctx_.gl_ubo_align()));
+    };
 
     bool prev_vl_valid = false;
     VertexLighting prev_vl{};
@@ -1597,48 +1579,26 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
     // Reset vl to unlit initially
     {
         VertexLighting init_vl{};
-        glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(init_vl), &init_vl);
+        stage(1, init_vl);
     }
 
     static const Mat4 kIdentity{};
 
     for (const Visible& v : vis) {
         const GpuModel* model = v.item->model;
-        GLuint vbo = (GLuint)(uintptr_t)model->vertex_buffer();
-        GLuint ibo = (GLuint)(uintptr_t)model->index_buffer();
-        uintptr_t v_base = uintptr_t(v.mesh->vertex_offset) * sizeof(scene::Vertex);
-
-        bool need_attrib_update = (vbo != bound_vbo || v_base != bound_v_base);
-        if (vbo != bound_vbo) {
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            bound_vbo = vbo;
-        }
-        if (ibo != bound_ibo) {
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-            bound_ibo = ibo;
-        }
-        if (need_attrib_update) {
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, pos)));
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, normal)));
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, uv)));
-            glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(scene::Vertex), (void*)(v_base + offsetof(scene::Vertex, color)));
-            bound_v_base = v_base;
-        }
-
-        bool is_ident = (std::memcmp(v.world.m.data(), kIdentity.m.data(), sizeof(kIdentity.m)) == 0);
-        Mat4 mvp = is_ident ? view_proj : view_proj * v.world;
-        Mat4 nm = is_ident ? kIdentity : transpose(inverse(v.world));
-        VertexUniforms vu{};
-        std::copy(mvp.m.begin(), mvp.m.end(), vu.mvp);
-        std::copy(v.world.m.begin(), v.world.m.end(), vu.model);
-        std::copy(nm.m.begin(), nm.m.end(), vu.normal_mat);
-        for (int i = 0; i < 4; ++i) vu.view_z[i] = view.at(2, i);
-        vu.fog[0] = opt.fog_start, vu.fog[1] = opt.fog_max, vu.fog[2] = opt.fog_gt3 ? 1.0f : 0.0f;
-
-        if (!prev_vu_valid || std::memcmp(&vu, &prev_vu, sizeof(vu)) != 0) {
-            glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert());
-            glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vu), &vu);
+        // View, projection and fog are constant throughout this pass. Adjacent meshes
+        // with the same world matrix can share the complete block and normal matrix.
+        if (!prev_vu_valid || std::memcmp(v.world.m.data(), prev_vu.model, sizeof(prev_vu.model)) != 0) {
+            const bool identity = std::memcmp(v.world.m.data(), kIdentity.m.data(), sizeof(kIdentity.m)) == 0;
+            const Mat4 mvp = identity ? view_proj : view_proj * v.world;
+            const Mat4 nm = identity ? kIdentity : transpose(inverse(v.world));
+            VertexUniforms vu{};
+            std::copy(mvp.m.begin(), mvp.m.end(), vu.mvp);
+            std::copy(v.world.m.begin(), v.world.m.end(), vu.model);
+            std::copy(nm.m.begin(), nm.m.end(), vu.normal_mat);
+            for (int i = 0; i < 4; ++i) vu.view_z[i] = view.at(2, i);
+            vu.fog[0] = opt.fog_start, vu.fog[1] = opt.fog_max, vu.fog[2] = opt.fog_gt3 ? 1.0f : 0.0f;
+            stage(0, vu);
             prev_vu = vu;
             prev_vu_valid = true;
         }
@@ -1681,12 +1641,6 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
             }
         }
 
-        static int s_first_draw = 0;
-        if (s_first_draw++ < 3) {
-            LOG_INFO("encode_gles3 draw: mvp[0]=%.3f, mvp[5]=%.3f, mvp[10]=%.3f, mvp[14]=%.3f, prims=%zu",
-                     vu.mvp[0], vu.mvp[5], vu.mvp[10], vu.mvp[14], v.mesh->primitives.size());
-        }
-
         for (const scene::Primitive& p : v.mesh->primitives) {
             bool double_sided = (p.flags & scene::kDoubleSided) && !v.item->single_sided;
             int desired_cull = 0;
@@ -1695,29 +1649,10 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
                 if (opt.mirrored) cull_face = (cull_face == GL_BACK) ? GL_FRONT : GL_BACK;
                 desired_cull = (cull_face == GL_FRONT) ? 2 : 1;
             }
-            if (desired_cull != bound_cull) {
-                if (desired_cull == 0) {
-                    glDisable(GL_CULL_FACE);
-                } else {
-                    if (bound_cull <= 0) glEnable(GL_CULL_FACE);
-                    glCullFace(desired_cull == 2 ? GL_FRONT : GL_BACK);
-                }
-                bound_cull = desired_cull;
-            }
-
             int desired_color_mask = 0;
             if (v.item->frame_alpha && (p.flags & scene::kAlphaOnly)) {
                 desired_color_mask = 1;
             }
-            if (desired_color_mask != bound_color_mask) {
-                if (desired_color_mask == 1) {
-                    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
-                } else {
-                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                }
-                bound_color_mask = desired_color_mask;
-            }
-
             int desired_blend = 0;
             if (v.item->dest_alpha_blend == 1) {
                 desired_blend = 3;
@@ -1729,31 +1664,7 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
                 desired_blend = 2;
             }
 
-            if (desired_blend != bound_blend) {
-                if (desired_blend == 0) {
-                    glDisable(GL_BLEND);
-                } else if (desired_blend == 1) {
-                    if (bound_blend <= 0) glEnable(GL_BLEND);
-                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-                } else if (desired_blend == 2) {
-                    if (bound_blend <= 0) glEnable(GL_BLEND);
-                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                } else if (desired_blend == 3) {
-                    if (bound_blend <= 0) glEnable(GL_BLEND);
-                    glBlendFunc(GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA);
-                } else if (desired_blend == 4) {
-                    if (bound_blend <= 0) glEnable(GL_BLEND);
-                    glBlendFunc(GL_DST_ALPHA, GL_ONE);
-                }
-                bound_blend = desired_blend;
-            }
-
             int desired_depth_mask = (!(p.flags & scene::kNoDepthWrite) && !v.item->background) ? 1 : 0;
-            if (desired_depth_mask != bound_depth_mask) {
-                glDepthMask(desired_depth_mask ? GL_TRUE : GL_FALSE);
-                bound_depth_mask = desired_depth_mask;
-            }
-
             GLuint tex = ctx_.gl_white();
             int clamp_mode = 0;
             bool textured = false;
@@ -1769,15 +1680,7 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
                     textured = true;
                 }
             }
-            if (tex != bound_tex) {
-                glBindTexture(GL_TEXTURE_2D, tex);
-                bound_tex = tex;
-            }
             GLuint samp = ctx_.gl_sampler(clamp_mode);
-            if (samp != bound_sampler) {
-                glBindSampler(0, samp);
-                bound_sampler = samp;
-            }
 
             FragmentUniforms fu = base_item_fu;
             bool blended_prim = (p.flags & (scene::kAdditive | scene::kAlphaBlend | scene::kMultiplyDest | scene::kAlphaOnly)) != 0 || v.item->alpha < 1.0f;
@@ -1838,29 +1741,27 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
                 std::copy(std::begin(fu.mat_emission), std::end(fu.mat_emission), vl.mat_emission);
 
                 if (!prev_vl_valid || std::memcmp(&vl, &prev_vl, sizeof(vl)) != 0) {
-                    glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
-                    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vl), &vl);
+                    stage(1, vl);
                     prev_vl = vl;
                     prev_vl_valid = true;
                 }
             } else if (prev_vl_valid) {
                 // Return to unlit
                 VertexLighting vl{};
-                glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_vert_lit());
-                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vl), &vl);
+                stage(1, vl);
                 prev_vl_valid = false;
             }
 
             if (!prev_fu_valid || std::memcmp(&fu, &prev_fu, sizeof(fu)) != 0) {
-                glBindBuffer(GL_UNIFORM_BUFFER, ctx_.gl_ubo_frag());
-                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fu), &fu);
+                stage(2, fu);
                 prev_fu = fu;
                 prev_fu_valid = true;
             }
 
             u32 first = v.mesh->index_offset + p.first_index;
             if (p.index_count > 0) {
-                glDrawElements(GL_TRIANGLES, p.index_count, GL_UNSIGNED_INT, (void*)(uintptr_t)(first * sizeof(u32)));
+                gl_draws_.push_back({model, v.mesh->vertex_offset, first, p.index_count, tex, samp,
+                                     desired_cull, desired_blend, desired_depth_mask, desired_color_mask, offsets});
                 ++stats_.draw_calls;
                 stats_.triangles += p.index_count / 3;
             }
@@ -1868,6 +1769,103 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
         ++stats_.meshes_drawn;
     }
 
+    const Uint64 submit_start = profile ? SDL_GetTicksNS() : 0;
+    auto& counters = ctx_.gl_profile().frame;
+    if (profile) {
+        ++counters.passes;
+        counters.draws += stats_.draw_calls;
+        counters.triangles += stats_.triangles;
+        counters.prepare_ms += double(submit_start - prepare_start) / 1e6;
+    }
+    const GLuint buffers[3] = {ctx_.gl_ubo_vert(), ctx_.gl_ubo_vert_lit(), ctx_.gl_ubo_frag()};
+    const size_t sizes[3] = {sizeof(VertexUniforms), sizeof(VertexLighting), sizeof(FragmentUniforms)};
+    const bool stream = ctx_.gl_uniform_stream();
+    if (stream) {
+        for (int slot = 0; slot < 3; ++slot) {
+            const auto& uniforms = gl_uniforms_[slot];
+            if (!uniforms.size()) continue;
+            glBindBuffer(GL_UNIFORM_BUFFER, buffers[slot]);
+            // Orphan the previous store, which may still be used by another view/frame.
+            glBufferData(GL_UNIFORM_BUFFER, GLsizeiptr(uniforms.size()), nullptr, GL_STREAM_DRAW);
+            glBufferSubData(GL_UNIFORM_BUFFER, 0, GLsizeiptr(uniforms.size()), uniforms.data());
+            if (profile) ++counters.uploads, counters.upload_bytes += uniforms.size();
+        }
+    } else {
+        for (int slot = 0; slot < 3; ++slot) glBindBufferBase(GL_UNIFORM_BUFFER, GLuint(slot), buffers[slot]);
+    }
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
+    GLuint bound_vbo = 0, bound_ibo = 0, bound_tex = 0, bound_sampler = 0;
+    uintptr_t bound_v_base = UINTPTR_MAX;
+    int bound_cull = -1, bound_blend = -1, bound_depth_mask = -1, bound_color_mask = -1;
+    std::array<size_t, 3> bound_uniforms{SIZE_MAX, SIZE_MAX, SIZE_MAX};
+    for (const GlDraw& d : gl_draws_) {
+        const GLuint vbo = GLuint(uintptr_t(d.model->vertex_buffer()));
+        const GLuint ibo = GLuint(uintptr_t(d.model->index_buffer()));
+        const uintptr_t base = uintptr_t(d.vertex_offset) * sizeof(scene::Vertex);
+        if (vbo != bound_vbo) glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        if (ibo != bound_ibo) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        if (vbo != bound_vbo || base != bound_v_base) {
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(base + offsetof(scene::Vertex, pos)));
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(base + offsetof(scene::Vertex, normal)));
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(scene::Vertex), (void*)(base + offsetof(scene::Vertex, uv)));
+            glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(scene::Vertex), (void*)(base + offsetof(scene::Vertex, color)));
+        }
+        bound_vbo = vbo, bound_ibo = ibo, bound_v_base = base;
+        if (d.cull != bound_cull) {
+            if (d.cull == 0) glDisable(GL_CULL_FACE);
+            else {
+                if (bound_cull <= 0) glEnable(GL_CULL_FACE);
+                glCullFace(d.cull == 2 ? GL_FRONT : GL_BACK);
+            }
+            bound_cull = d.cull;
+        }
+        if (d.color_mask != bound_color_mask) {
+            glColorMask(d.color_mask ? GL_FALSE : GL_TRUE, d.color_mask ? GL_FALSE : GL_TRUE,
+                        d.color_mask ? GL_FALSE : GL_TRUE, GL_TRUE);
+            bound_color_mask = d.color_mask;
+        }
+        if (d.blend != bound_blend) {
+            if (d.blend == 0) glDisable(GL_BLEND);
+            else {
+                if (bound_blend <= 0) glEnable(GL_BLEND);
+                switch (d.blend) {
+                case 1: glBlendFunc(GL_SRC_ALPHA, GL_ONE); break;
+                case 2: glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
+                case 3: glBlendFunc(GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA); break;
+                case 4: glBlendFunc(GL_DST_ALPHA, GL_ONE); break;
+                }
+            }
+            bound_blend = d.blend;
+        }
+        if (d.depth_mask != bound_depth_mask) {
+            glDepthMask(d.depth_mask ? GL_TRUE : GL_FALSE);
+            bound_depth_mask = d.depth_mask;
+        }
+        if (d.texture != bound_tex) glBindTexture(GL_TEXTURE_2D, d.texture);
+        if (d.sampler != bound_sampler) glBindSampler(0, d.sampler);
+        bound_tex = d.texture, bound_sampler = d.sampler;
+        for (int slot = 0; slot < 3; ++slot) {
+            if (d.uniforms[size_t(slot)] == bound_uniforms[size_t(slot)]) continue;
+            const size_t offset = d.uniforms[size_t(slot)];
+            if (stream) {
+                glBindBufferRange(GL_UNIFORM_BUFFER, GLuint(slot), buffers[slot], GLintptr(offset), GLsizeiptr(sizes[slot]));
+                if (profile) ++counters.uniform_binds;
+            } else {
+                glBindBuffer(GL_UNIFORM_BUFFER, buffers[slot]);
+                glBufferSubData(GL_UNIFORM_BUFFER, 0, GLsizeiptr(sizes[slot]), gl_uniforms_[slot].data() + offset);
+                if (profile) ++counters.uploads, counters.upload_bytes += sizes[slot];
+            }
+            bound_uniforms[size_t(slot)] = offset;
+        }
+        if (profile && d.blend != 0) ++counters.blended;
+        glDrawElements(GL_TRIANGLES, GLsizei(d.index_count), GL_UNSIGNED_INT,
+                       (void*)(uintptr_t(d.first_index) * sizeof(u32)));
+    }
+
+    if (profile) counters.submit_ms += double(SDL_GetTicksNS() - submit_start) / 1e6;
     if (bound_color_mask != 0) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
     glDisableVertexAttribArray(0);

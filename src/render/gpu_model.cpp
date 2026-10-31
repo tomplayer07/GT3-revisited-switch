@@ -1,6 +1,7 @@
 #include "render/gpu_model.h"
 
 #include "base/log.h"
+#include "base/render_profile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -219,6 +220,11 @@ GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model) : ctx_(&ctx), dev
 // Each upload goes through staging_ (grown when too small), at 16-byte aligned offsets, into its
 // buffer from offset 0 with cycling: frames still drawing keep the old contents.
 bool GpuModel::stage(const Upload* uploads, int count) {
+    render_profile::Scope measure(render_profile::frame.geometry);
+    if (render_profile::enabled) for (int i = 0; i < count; ++i) {
+        ++render_profile::frame.geometry_updates;
+        render_profile::frame.geometry_bytes += uploads[i].size;
+    }
 #if defined(__SWITCH__)
     for (int i = 0; i < count; ++i) {
         if (!uploads[i].size) continue;
@@ -265,13 +271,32 @@ bool GpuModel::stage(const Upload* uploads, int count) {
 
 bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
     if (!vertices_ || all.size() != vertex_count_) return false;
+#if defined(__SWITCH__)
+    if (uploaded_vertices_.matches(all)) {
+        if (render_profile::enabled) ++render_profile::frame.geometry_skipped;
+        return true;
+    }
+#endif
     const Upload u{vertices_, all.data(), u32(all.size() * sizeof(scene::Vertex))};
-    return stage(&u, 1);
+    const bool ok = stage(&u, 1);
+#if defined(__SWITCH__)
+    if (ok) uploaded_vertices_.remember(all);
+    else uploaded_vertices_.invalidate();
+#endif
+    return ok;
 }
 
 bool GpuModel::update_textures(const std::vector<TextureUpdate>& updates) {
+#if defined(__SWITCH__)
+    // Diagnostic isolation: keep the initial images, while CPU palette animation,
+    // moving geometry, lighting and simulation continue. Not a quality preset.
+    if (ctx_->gl_freeze_textures()) return true;
+#endif
     bool ok = true;
     Uploader up(device_);
+#if defined(__SWITCH__)
+    texture_batch_.clear();
+#endif
     for (const TextureUpdate& u : updates) {
         TextureInfo* t = u.index < textures_.size() ? &textures_[u.index] : nullptr;
         if (!t || !t->texture || !u.rgba || u.rgba->size() != size_t(t->width) * t->height) {
@@ -279,14 +304,49 @@ bool GpuModel::update_textures(const std::vector<TextureUpdate>& updates) {
             continue;
         }
         if (ctx_->take_texture(t->texture)) {
-            up.update_rgba(t->texture, t->width, t->height, u.rgba->data(), true, true);
-        } else if (SDL_GPUTexture* own = up.texture_rgba(t->width, t->height, u.rgba->data(), true)) {
+#if defined(__SWITCH__)
+            SDL_GPUTexture* target = t->texture;
+            if (ctx_->gl_texture_rotate()) {
+                // take_texture above first detaches shared storage. Other models
+                // keep their original image; this model owns every ring slot.
+                if (!t->rotation.initialized()) t->rotation.adopt(t->texture);
+                target = t->rotation.target();
+                if (!target) {
+                    target = up.texture_rgba(t->width, t->height, u.rgba->data(), !t->no_mips);
+                    if (!target) { ok = false; continue; }
+                    t->rotation.advance(target);
+                    t->texture = target;
+                    continue; // the new image already contains this update
+                }
+            }
+            if (ctx_->gl_texture_stream()) {
+                render_profile::Scope stage_measure(render_profile::frame.texture_stage);
+                ok = texture_batch_.add(u32(uintptr_t(target)), t->width, t->height, *u.rgba, !t->no_mips) && ok;
+            } else
+#endif
+            {
+#if defined(__SWITCH__)
+                up.update_rgba(target, t->width, t->height, u.rgba->data(), !t->no_mips, true);
+#else
+                up.update_rgba(t->texture, t->width, t->height, u.rgba->data(), !t->no_mips, true);
+#endif
+            }
+#if defined(__SWITCH__)
+            if (ctx_->gl_texture_rotate()) {
+                t->rotation.advance(target);
+                t->texture = target;
+            }
+#endif
+        } else if (SDL_GPUTexture* own = up.texture_rgba(t->width, t->height, u.rgba->data(), !t->no_mips)) {
             ctx_->release_texture(t->texture); // other models keep drawing the shared texels
             t->texture = own;
         } else {
             ok = false;
         }
     }
+#if defined(__SWITCH__)
+    ctx_->upload_gl_textures(texture_batch_);
+#endif
     return up.submit() && ok;
 }
 
@@ -297,19 +357,40 @@ bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
     std::vector<scene::Vertex> vertices;
     std::vector<u32> indices;
     meshes_.clear();
-    assemble(meshes, textures().size(), false, vertices, indices, meshes_);
+    {
+        render_profile::Scope measure(render_profile::frame.assemble);
+        assemble(meshes, textures().size(), false, vertices, indices, meshes_);
+    }
     vertex_count_ = vertices.size();
     const u32 vsize = u32(vertices.size() * sizeof(scene::Vertex)), isize = u32(indices.size() * sizeof(u32));
     if (vsize == 0 || isize == 0) return true; // nothing drawn (meshes_ is empty too)
     bool vok = true, iok = true;
-    ensure_buffer(device_, SDL_GPU_BUFFERUSAGE_VERTEX, vertices_, vertex_capacity_, vsize, vok);
+    const bool new_vertices = ensure_buffer(device_, SDL_GPU_BUFFERUSAGE_VERTEX, vertices_, vertex_capacity_, vsize, vok);
+#if defined(__SWITCH__)
+    if (new_vertices) uploaded_vertices_.invalidate();
+#else
+    (void)new_vertices;
+#endif
     // The index buffer only when its contents change (the animated nodes' usually don't).
     if (ensure_buffer(device_, SDL_GPU_BUFFERUSAGE_INDEX, indices_, index_capacity_, isize, iok))
         uploaded_indices_.clear();
-    Upload uploads[2] = {{vertices_, vertices.data(), vsize}, {indices_, indices.data(), isize}};
     const bool same_indices = indices == uploaded_indices_;
-    bool ok = vok && iok && stage(uploads, same_indices ? 1 : 2);
+#if defined(__SWITCH__)
+    const bool same_vertices = uploaded_vertices_.matches(vertices);
+#else
+    const bool same_vertices = false;
+#endif
+    Upload uploads[2];
+    int count = 0;
+    if (!same_vertices) uploads[count++] = {vertices_, vertices.data(), vsize};
+    if (!same_indices) uploads[count++] = {indices_, indices.data(), isize};
+    if (render_profile::enabled && same_vertices) ++render_profile::frame.geometry_skipped;
+    bool ok = vok && iok && (!count || stage(uploads, count));
     if (ok && !same_indices) uploaded_indices_ = std::move(indices);
+#if defined(__SWITCH__)
+    if (ok && !same_vertices) uploaded_vertices_.remember(vertices);
+    if (!ok) uploaded_vertices_.invalidate();
+#endif
     if (!ok) meshes_.clear(), uploaded_indices_.clear();
     return ok;
 }
@@ -325,7 +406,15 @@ GpuModel::~GpuModel() {
     if (vertices_) SDL_ReleaseGPUBuffer(device_, vertices_);
     if (indices_) SDL_ReleaseGPUBuffer(device_, indices_);
 #endif
-    for (TextureInfo& t : textures_) ctx_->release_texture(t.texture);
+    for (TextureInfo& t : textures_) {
+#if defined(__SWITCH__)
+        if (t.rotation.initialized()) {
+            for (SDL_GPUTexture* image : t.rotation.handles()) if (image) ctx_->release_texture(image);
+            continue;
+        }
+#endif
+        ctx_->release_texture(t.texture);
+    }
 }
 
 } // namespace gt3r::render

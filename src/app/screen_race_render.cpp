@@ -614,7 +614,10 @@ render::DrawOptions RaceScreen::draw_options() const {
 
 void RaceScreen::render_drive(App& app, Ui& ui) {
     app.note_race_scale();
-    upload_course_animations(); // once per frame
+    {
+        render_profile::Scope measure(render_profile::frame.animations);
+        upload_course_animations(); // once per frame
+    }
     // The game area (App::aspect): 640 x 360 at 16:9, 480 x 360 at 4:3 (GT3's 4:3 picture),
     // the window's shape with fill.
     const float W = ui.width(), H = ui.height();
@@ -713,6 +716,7 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     remove_wet_road(wet_items); // (the wet road's frame items belong to this view only)
     hitch::draw_ms = double(SDL_GetTicksNS() - h_c1) / 1e6;
     hitch::meshes = view_->stats().meshes_drawn;
+    const Uint64 lamps_start = SDL_GetTicksNS();
     float sun_v = sun_visibility(eye, camera_.fovy(), rect.h);
     if (debug_ && sun_.params().enabled && (++sun_log_ % 60) == 0) LOG_INFO("sun visibility %.2f", sun_v);
     sun_.draw(ui.renderer(), rect, camera_.view(), camera_.fovy(), sun_v);
@@ -725,6 +729,7 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     lamps_.draw(ui.renderer(), rect, camera_.view(), eye, camera_.fovy(), occl, flare_lines);
     if (car_lamps_.active())
         car_lamps_.draw(ui.renderer(), rect, camera_.view(), eye, camera_.fovy(), lamp_cars(), occl, flare_lines);
+    hitch::lamps_ms = double(SDL_GetTicksNS() - lamps_start) / 1e6;
     if (!replaying_ && camera_.onboard() && camera_.mirror() && !camera_.look_back() && (!split || horizontal))
         draw_mirror(app, ui, rect, o, false, split);
     if (split) {
@@ -738,11 +743,21 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
             draw_mirror(app, ui, rect2, o, true, true);
     }
     } // (the flat views)
-    if (preset_.gpusync) SDL_WaitForGPUIdle(app.gpu()->device()); // measure: CPU + GPU time of the 3D pass
+    if (preset_.gpusync) { // Diagnostic only: serializes CPU and GPU work.
+#if defined(__SWITCH__)
+        SDL_FlushRenderer(ui.renderer());
+        glFinish();
+#else
+        SDL_WaitForGPUIdle(app.gpu()->device());
+#endif
+    }
     double draw_ms = double(SDL_GetPerformanceCounter() - t0) * 1000.0 / double(SDL_GetPerformanceFrequency());
     if (!paused_ && frame_ms_ > 0) perf_.add(frame_ms_, draw_ms);
+    if (render_profile::enabled) render_profile::frame.scene += draw_ms;
     log_perf(false);
 
+    {
+    render_profile::Scope measure(render_profile::frame.hud);
     if (logger_mode_) { // the Analyzer over the replay (or its graph over everything)
         SDL_FRect dst = original_res_ ? frame_rect_ : menu_dst;
         if (analyzer_.view() == Analyzer::View::Graph) {
@@ -792,6 +807,8 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
             ui.text(10, 52, line, Color{200, 205, 215, 200});
         }
     }
+    } // HUD
+    render_profile::Scope overlays_measure(render_profile::frame.overlays);
     // Results overlay over the running race after the finish.
     if (two_player_ && split && !replaying_ && (finished_ || finished2_)) {
         // 2P (the captures): a finished player's half shows AUTO DRIVE, then the RACE RESULTS
@@ -918,7 +935,7 @@ std::vector<CarLampGlows::Car> RaceScreen::lamp_cars() const {
     std::vector<CarLampGlows::Car> out;
     auto add = [&](const CarVisual* v, const sim::VehicleState& s, const sim::VehicleSetup& su, size_t idx) {
         if (!v || v->lamps().empty()) return;
-        out.push_back({&v->lamps(), v->body_matrix(s, su), brake_lamps_.factor(idx), brake_lamps_.now(idx)});
+        out.push_back({&v->lamps(), v->body_matrix(s, su), brake_lamps_.factor(idx), brake_lamps_.now(idx), &v->lamp_occluder()});
     };
     add(car_visual_.get(), render_state_, vehicle_->setup(), 0);
     if (field_ && field_->has_second())

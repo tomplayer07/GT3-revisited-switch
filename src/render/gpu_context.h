@@ -15,6 +15,8 @@
 // nullptr and the app runs 2D-only.
 
 #include "base/bytes.h"
+#include "render/switch_profile.h"
+#include "render/texture_upload_batch.h"
 #include "xr/xr_session.h" // VR builds (GT3R_XR)
 
 #include <SDL3/SDL.h>
@@ -72,6 +74,11 @@ struct GpuOptions {
     // VR builds (GT3R_XR): create the device through the headset's OpenXR runtime when there is
     // one; the 2D renderer then draws offscreen (canvases of xr::Session) instead of the window.
     bool xr = false;
+    bool switch_uniform_stream = false; // immutable UBO ranges, uploaded once per 3D pass
+    bool switch_freeze_textures = false; // diagnostic, only honoured with profiling enabled
+    bool switch_texture_rotate = false; // alternate animated images, experimental
+    bool switch_texture_stream = false; // batch animated texture uploads through a pixel buffer
+    bool switch_profile = false;       // detailed periodic CPU/GPU diagnostics
 };
 
 class Uploader;
@@ -93,6 +100,12 @@ public:
 #endif
 #if defined(__SWITCH__)
     const char* driver_name() const { return "OpenGL ES 3.2 (Mesa Nouveau)"; }
+    SwitchProfile& gl_profile() { return gl_profile_; }
+    bool gl_freeze_textures() const { return gl_freeze_textures_; }
+    bool gl_texture_rotate() const { return gl_texture_rotate_; }
+    bool gl_texture_stream() const { return gl_texture_stream_; }
+    void upload_gl_textures(const TextureUploadBatch& batch);
+    bool gl_uniform_stream() const { return gl_uniform_stream_; }
     GLuint gl_program() const { return gl_program_; }
     GLuint gl_ubo_vert() const { return gl_ubo_vert_; }
     GLuint gl_ubo_vert_lit() const { return gl_ubo_vert_lit_; }
@@ -170,6 +183,12 @@ private:
 
     SDL_GPUDevice* device_ = nullptr;
 #if defined(__SWITCH__)
+    SwitchProfile gl_profile_;
+    bool gl_freeze_textures_ = false;
+    bool gl_texture_rotate_ = false;
+    bool gl_texture_stream_ = false;
+    GLuint gl_texture_pbo_ = 0;
+    bool gl_uniform_stream_ = false;
     GLuint gl_program_ = 0;
     GLuint gl_ubo_vert_ = 0;
     GLuint gl_ubo_vert_lit_ = 0;

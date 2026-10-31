@@ -1,4 +1,5 @@
 #include "formats/clut_animation.h"
+#include "base/render_profile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -168,6 +169,7 @@ ClutTextures::ClutTextures(ByteSpan tex1, bool region_crop) {
         for (u32 y = 0; y < r.height; ++y)
             for (u32 x = 0; x < r.width; ++x)
                 r.texels[size_t(y) * r.width + x] = u8(gs.read_texel(t0.tbp, t0.tbw, t0.psm, x0 + x, y0 + y) & (n - 1));
+        for (u8 texel : r.texels) r.used[texel] = true;
         records_.push_back(std::move(r));
     }
     colours_.assign(anims.size(), {});
@@ -210,15 +212,24 @@ u32 ClutTextures::min_alpha(u32 index) const {
     return 255;
 }
 
-void ClutTextures::recolour(Record& r) const {
+bool ClutTextures::recolour(Record& r) const {
+    bool changed = r.rgba.empty();
     u32 pal[256];
     for (u32 i = 0; i < 256; ++i) {
         u32 c = r.palette[i];
         if (r.source[i] >= 0) c = clut_rgba(colours_[size_t(r.source[i] >> 16)][size_t(r.source[i] & 0xFFFF)], r.cpsm);
         pal[i] = r.tcc ? c : (c | 0xFF000000u);
+        if (r.used[i] && pal[i] != r.applied_palette[i]) changed = true;
     }
+    if (!changed) {
+        if (render_profile::enabled) ++render_profile::frame.palette_skipped;
+        return false;
+    }
+    std::copy(std::begin(pal), std::end(pal), std::begin(r.applied_palette));
+    if (render_profile::enabled) render_profile::frame.palette_pixels += r.texels.size();
     r.rgba.resize(r.texels.size());
     for (size_t k = 0; k < r.texels.size(); ++k) r.rgba[k] = pal[r.texels[k]];
+    return true;
 }
 
 std::vector<u32> ClutTextures::refresh() {
@@ -235,8 +246,7 @@ std::vector<u32> ClutTextures::refresh() {
         bool dirty = false;
         for (u32 i = 0; i < 256 && !dirty; ++i) dirty = r.source[i] >= 0 && changed[size_t(r.source[i] >> 16)];
         if (!dirty) continue;
-        recolour(r);
-        out.push_back(r.index);
+        if (recolour(r)) out.push_back(r.index);
     }
     return out;
 }

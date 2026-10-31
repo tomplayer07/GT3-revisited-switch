@@ -346,3 +346,184 @@ GT3R_VIEWER="item=1,full=1,wire=1,lod=-1,cull=0,spin=0,yaw=0.5,pitch=0.3,zoom=0.
 
 The demo screen `viewer` ("3D viewer (test scene)") needs no game data, so
 `--screen viewer` also works before a disc is chosen.
+
+## Nintendo Switch GLES uniform streaming and profiling
+
+The Switch backend uses Mesa/Nouveau GLES and SDL's GLES 2D renderer. With
+`switch_uniform_stream = on`, each 3D pass first records its draws and stages the three uniform blocks in CPU
+memory. Each changed block gets an immutable range aligned to the driver's
+`GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT`. After preparation, each UBO's previous
+store is orphaned with `glBufferData` and all its ranges are uploaded with
+one `glBufferSubData`. Draws select ranges with `glBindBufferRange`; they
+never overwrite uniform bytes used by an earlier draw. CPU staging and draw
+lists retain their capacity between passes. Adjacent meshes sharing a world
+matrix also share their transform block and normal-matrix calculation.
+Draw order, shaders, materials and visual quality are preserved.
+
+In `sdmc:/switch/gt3r/config.ini`, under the existing `[video]` section:
+
+```ini
+switch_uniform_stream = off
+switch_profile = on
+```
+
+`switch_uniform_stream` defaults to `off` after Route 5 console comparisons
+showed similar FPS and higher GPU interval times with streaming. Set it to
+`on` and restart to compare immutable UBO ranges with the offset-zero upload
+strategy using the same recorded draws. The CPU preparation changes remain
+enabled in both modes. It is an upload-strategy comparison, not a comparison against the entire old binary.
+`switch_profile` defaults to `off`; turn it on for diagnostic runs and restart.
+It adds `SWPERF` summaries every three seconds to the existing
+`sdmc:/switch/gt3r/gt3r.log` (overwritten on each launch):
+
+- Average/worst frame time and frames above 17.5 ms (a diagnostic threshold,
+  not a count of missed display refreshes).
+- CPU update, render and presentation times; 3D preparation/submission time;
+  CPU time submitting SDL batches; main-view item collection and lamp/sun work.
+  These timings overlap: preparation/submission and collection are parts of
+  render time, while the final SDL flush is outside it.
+- Total 3D passes, draws, blended draws and triangles across all views and
+  offscreen passes, plus UBO uploads, actual upload bytes (including padding)
+  and range bindings per frame. SDL 2D draw calls are not counted.
+- GPU render interval average/max and sample count, excluding presentation,
+  using `GL_EXT_disjoint_timer_query` if available. Results are read only when
+  ready, with an eight-query pool; a full pool skips a sample. Clock-disjoint
+  results are discarded. An unsupported timer reports `n/a`, never CPU time
+  presented as a GPU measurement. GPU samples arrive in later frames and do
+  not align exactly with the CPU summary window. Elapsed GPU timeline time
+  can include gaps waiting for the CPU to submit more work.
+
+Profiling flushes queued SDL drawing before ending the GPU interval. Use the
+same profile setting for both sides of an upload comparison, then disable it
+for normal play. The existing `GT3R_RACE` option `gpusync=1` now correctly
+flushes SDL and calls `glFinish` on Switch; it intentionally serializes work
+and is unnecessary for the asynchronous profiler.
+
+For a useful comparison, drive the same night course and a day course with
+the same cars, camera, resolution, VSync and clocks. Allow loading to settle,
+then capture at least 30 seconds per course. Preserve the log before launching
+again. Repeat with `switch_uniform_stream = on`; compare frame times as
+well as CPU submission, GPU interval and upload counts. Performance and visual
+correctness still need validation on real Switch hardware.
+
+
+`SWDETAIL` summaries split CPU rendering into circuit-animation uploads,
+main-scene work, HUD (including its data preparation) and overlays. Nested
+animation timings cover palette expansion, moving-node mesh generation,
+geometry assembly/upload and texture update/mipmap generation. Texture bytes
+count level-zero uploads; mip generation is counted separately. Upload and
+skip counts are per frame. These nested timings must not be added to their
+parent timings. Some uploads can also occur in update or HUD code; their
+counters cover the whole frame.
+
+The Switch dynamic vertex cache skips transfers only when all vertex bytes
+match the last successful upload; normals, UVs and colours participate, and a
+new allocation invalidates the cache. Indices and render metadata are still
+checked independently. Moving-node geometry is rebuilt only when effective
+animation operands change. CLUT refresh ignores changes to unused palette
+entries and alpha changes when TCC makes the texture opaque. Textures marked
+`no_mips` no longer regenerate mipmaps after animation updates. Timing,
+animation colours, geometry selection and rendering order are preserved.
+
+For the next Route 5 measurement, keep `switch_uniform_stream = off` and
+`switch_profile = on` in both runs, with the same clocks, view and resolution.
+Use the same replay when possible to reduce differences in traffic and camera.
+
+
+### Batched animated texture transfers on Switch
+
+The next Route 5 run identified about 17.6 ms/frame in circuit-animation
+uploads, including about 10.7 ms in texture updates for only 86 KiB/frame
+(approximately 31 images). Palette expansion was about 0.26 ms and HUD
+submission about 0.60 ms. These are CPU elapsed times, which can include
+implicit driver waits; they do not establish a bandwidth bottleneck.
+The unchanged-geometry/palette skips were almost never exercised on this track.
+
+`[video] switch_texture_stream = on` (experimental; default `off`) snapshots changed images into a
+reused CPU batch per model and uploads that batch through a persistent
+`GL_PIXEL_UNPACK_BUFFER` with a new backing store per submission. The image
+commands then reference byte offsets within that buffer. This gives the
+driver GPU-accessible transfer storage without a separate client-memory upload
+for every image. Individual image updates and required mipmap builds remain;
+visuals and animation frequency are preserved. The PBO binding and pixel-unpack
+layout are restored after submission so SDL and ordinary uploads can continue
+using client pointers. Shared textures retain the existing copy-on-write path.
+
+`SWDETAIL: texture PBO` reports batches and bytes per frame, CPU staging time
+(including packing) and image-command time. These are nested within the texture
+update/animation work; do not sum them with their parents. CPU packing occurs
+before the timed GL texture-update section. PBOs can reduce CPU stalls but do
+not guarantee faster GPU execution or eliminate dependencies on previously
+drawn textures. Compare the same replay with `switch_texture_stream = off`
+and restart; keep `switch_uniform_stream = off` and `switch_profile = on` for
+both sides of this comparison. Real Switch validation is still required.
+
+
+### Animated texture rotation experiment
+
+The PBO trial did not improve Route 5 (about 30.8 vs 31.6 FPS, with almost
+identical geometry), so `switch_texture_stream` now defaults to `off`.
+`switch_texture_rotate = on` alternates three images per animated texture
+(default `off`). A shared texture is detached before entering the rotation;
+all extra images are released with the owning model. Texture identity changes,
+but texels, mipmaps, timing and sampler settings do not. This tests reuse of
+images sampled by earlier frames. It does not bypass GL synchronization or
+assume that three updates always cover all in-flight GPU work.
+
+Test the same Route 5 race, car, camera, clocks and resolution for 60–90 seconds:
+A: rotation off, PBO off (known baseline); B: rotation on, PBO off;
+C: rotation on, PBO on if B warrants further investigation. Keep uniform
+streaming off and profiling on. Restart the app between configurations and
+preserve each log. Ignore loading and the initial image allocations when
+comparing steady play. GPU elapsed intervals include possible CPU starvation.
+
+
+### Texture-update isolation test
+
+A Route 5 run at 50% linear 3D resolution reduced the measured GPU interval
+from about 12.1 to 7.8 ms, but frame rate remained about 31.7 FPS. This argues
+against pixel shading being the dominant steady-state bottleneck in that scene.
+
+`switch_freeze_textures = on` temporarily skips `GpuModel::update_textures`
+on Switch. It is honoured only with `switch_profile = on` and defaults to
+`off`. Initial model textures are still uploaded. CPU palette updates, moving
+geometry, lighting and simulation continue. Animated colours/signs/start lights
+will remain frozen: this diagnostic deliberately changes presentation to
+measure the causal effect of the texture transfers. Use native `render_scale =
+1.0` and disable uniform streaming, texture rotation and PBO streaming for this
+test. Afterwards set `switch_freeze_textures = off` and restart to restore
+normal animation. It is not a normal performance/quality setting.
+
+
+### Deferring periodic log writes
+
+`switch_defer_logs = on` (Switch default) buffers only SWPERF, SWDETAIL and
+Race perf messages in RAM, with a 1 MiB text budget. Oldest diagnostics are
+discarded if the budget fills; the flush reports their count. Other messages
+remain immediate, including warnings/errors. A forced race-performance report
+and normal SDL app shutdown flush the buffer. Return from the race or quit the
+app normally before retrieving the log; forced termination can lose buffered
+messages. Deferred diagnostic blocks can appear after the race-result lines.
+`switch_defer_logs = off` restores immediate SD writes for comparison. This
+preserves sampling and the freeze-texture diagnostic while removing periodic
+SD writes from steady racing. It does not suppress all possible file I/O.
+
+The deferred flush emits one multi-line SDL log message; the Switch stdout
+uses a 64 KiB buffer and the callback flushes once per message. This avoids
+hundreds of tiny writes at race exit. Immediate messages still flush normally.
+The exit operation remains synchronous, so an unusually slow SD can still
+cause a delay; a forced process termination can still lose diagnostics.
+
+
+### Car lamp self-occlusion
+
+Car-lamp glow/halo sprites previously tested course scenery only, allowing
+front lamp halos to appear over the back of the same car. Each car visual now
+builds a local-space triangle grid once from its LOD-0 opaque body panels.
+Lamp visibility rays also test that grid after transforming into the car frame.
+Glass, alpha-only masks and alpha-tested primitives with any transparent texture
+or vertex coverage are conservatively excluded. This avoids turning windows or
+cutouts into solid blockers, but can leave leaks where an entire primitive shares
+a texture containing cutouts. Morphing accessories and other cars are not included
+in this self-occlusion grid. Verify visually on the affected car and measure the
+lamp CPU timing on the Switch; this is not proof that the car material was transparent.

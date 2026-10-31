@@ -3,6 +3,7 @@
 
 #define SDL_MAIN_USE_CALLBACKS 1
 #include "app/app.h"
+#include "base/deferred_log.h"
 #include "app/launch_help.h"
 
 #include <SDL3/SDL_main.h>
@@ -33,7 +34,8 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char** argv) {
         freopen("gt3r.log", "w", stdout);
     }
     dup2(fileno(stdout), STDERR_FILENO);
-    setvbuf(stdout, NULL, _IONBF, 0);
+    static char log_buffer[64 * 1024];
+    setvbuf(stdout, log_buffer, _IOFBF, sizeof(log_buffer));
     setvbuf(stderr, NULL, _IONBF, 0);
 
     printf("=== GT3-Revisited starting on Nintendo Switch ===\n");
@@ -103,6 +105,7 @@ SDL_AppResult SDL_AppEvent(void* state, SDL_Event* event) {
 }
 
 void SDL_AppQuit(void* state, SDL_AppResult) {
+    gt3r::log_defer_diagnostics(false);
     if (auto* app = static_cast<App*>(state)) {
         app->shutdown();
         delete app;

@@ -85,11 +85,13 @@ private:
         bool tcc = true;
         u32 cpsm = 0;
         std::vector<u8> texels; // palette index per texel
+        bool used[256] = {};
+        u32 applied_palette[256] = {};
         u32 palette[256] = {};  // RGBA8 of the static entries
         s32 source[256];        // animated entries: (animation << 16 | word), else -1
         std::vector<u32> rgba;
     };
-    void recolour(Record& r) const;
+    bool recolour(Record& r) const;
 
     ClutPlayer player_;
     std::vector<Record> records_;

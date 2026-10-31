@@ -9,7 +9,7 @@ modern platforms: **Nintendo Switch (Atmosphère)**, **Windows, macOS, Linux, An
 > **🎮 This is the Nintendo Switch port fork** ([tomplayer07/GT3-revisited-switch](https://github.com/tomplayer07/GT3-revisited-switch)), based on the original project by [matt-pulsipher/GT3-revisited](https://github.com/matt-pulsipher/GT3-revisited).
 > 
 > - **Native `.nro` homebrew** running on Atmosphère (Horizon OS).
-> - **Custom OpenGL ES 3.0 backend** (via Mesa / deko3d / SDL3) to replace Vulkan on Switch.
+> - **Custom OpenGL ES 3.0 backend** (via Mesa/Nouveau and SDL3) to replace Vulkan on Switch.
 > - **Solid 60 FPS** on daytime tracks (Circuit di Roma, Trial Mountain, Super Speedway, etc.).
 > - **Status & Community Help Wanted**: Night tracks (Special Stage Route 5, Route 11) are playable but experience performance drops (~25-35 FPS). Community contributions and optimizations are welcome! See details [below](#-nintendo-switch-port).
 
@@ -96,11 +96,70 @@ To help future contributors understand what has already been tried and where the
 6. **Tuned Track Draw Distance (`src/app/screen_race_render.cpp`)**:
    - **Optimization**: Reduced the global track draw distance from upstream's 2,500 meters down to **650 meters** on Switch. This culls distant scenery that is invisible or imperceptible on a 720p handheld screen, preventing unnecessary vertex transformations and frustum checks.
 
-#### 💡 Open Areas for Further Optimization (Help Wanted!)
-If you are an experienced Switch homebrew or graphics developer:
-- **Point-Light Mode / Shaders**: On night courses (`point_lights_`), vertex and fragment shaders compute quadratic light attenuation for multiple lights. Adding a Switch-specific flat/directional night lighting mode could instantly push Route 5 to 60 FPS.
-- **VSync & Frame Pacing**: The Switch display uses FIFO double-buffering. When a frame takes 17 ms (just 0.4 ms over the 16.6 ms target), the framerate drops immediately to 30 FPS. Adaptive VSync or triple buffering could help maintain 50+ FPS instead of dropping to 30 FPS.
-- **Native `deko3d` Backend**: Replacing the Mesa OpenGL ES 3.0 translation layer with a native `deko3d` or raw Tegra backend would drastically reduce driver overhead.
+### Experimental night-track testing (October 31)
+
+This branch adds detailed Switch renderer profiling, deferred diagnostic logging,
+car-lamp self-occlusion, and optional upload experiments. **It does not yet provide
+normal animated night-track rendering at a stable 60 FPS.**
+
+On the tested Switch, Special Stage Route 5 dry with six cars and the Mazda 787B
+at native 3D resolution averaged approximately **31.6 FPS** with normal texture
+updates. Freezing animated-texture updates averaged **57.7–58.0 FPS** with
+periodic diagnostics buffered in RAM. These are separate driving runs, not an
+identical replay or a guarantee for other tracks, cars, clocks or consoles.
+The performance gain deliberately removes animated texture changes: flashing
+signs/lights, start signals and similar effects remain at their initial appearance.
+Physics, moving geometry and car lighting continue. This is a diagnostic mode,
+not a completed graphics optimization or a supported quality preset.
+
+To reproduce the diagnostic test, add these keys under the **existing** `[video]`
+section in `sdmc:/switch/gt3r/config.ini`, then restart:
+
+```ini
+render_scale = 1.0
+dynamic_resolution = off
+switch_profile = on
+switch_defer_logs = on
+switch_freeze_textures = on
+switch_uniform_stream = off
+switch_texture_stream = off
+switch_texture_rotate = off
+```
+
+Set `switch_freeze_textures = off` and restart for normal animated textures.
+The freeze option is honoured only while `switch_profile = on`. All upload
+experiments and texture freezing default to `off`; deferred diagnostic logging
+defaults to `on` on Switch. Uniform streaming, PBO transfers and triple-image
+rotation did not improve the tested Route 5 runs and remain opt-in experiments.
+Halving 3D resolution reduced the GPU interval but left FPS around 31.7 with
+normal texture updates, pointing to a bottleneck beyond pixel shading.
+
+`SWPERF` / `SWDETAIL` summaries include CPU timings, asynchronous GPU intervals
+when available, texture/mipmap transfers, moving geometry and HUD costs. They
+are buffered during play to avoid periodic microstutters from synchronous SD
+writes. **Exit the race or quit the app normally before retrieving
+`sdmc:/switch/gt3r/gt3r.log`**; forced termination may lose buffered diagnostics.
+The log is overwritten at the next launch. Deferred text has a 1 MiB budget;
+the flush reports any discarded older messages. Warnings and errors remain
+immediate. A batched final flush reduces the pause at race exit.
+
+The car-lamp fix prevents halos from showing through the opaque body of their
+own car; the tester confirmed the front-light leak was fixed on the 787B.
+**Known issue awaiting visual diagnosis:** small dark patches on that car's livery.
+Self-occlusion conservatively excludes glass/cutouts and does not include other
+cars or morphing accessories. Broader visual and performance testing is welcome.
+
+When reporting results, include track, car, camera, clocks, resolution, enabled
+flags and the log; compare the same replay when possible. Detailed measurement
+limits and implementation notes:
+[Switch renderer profiling](docs/dev/RENDERING.md#nintendo-switch-gles-uniform-streaming-and-profiling).
+
+#### Further optimization
+
+The next target is preserving animated textures while reducing their transfer
+cost. A native Deko3D backend remains a larger possible project; current results
+do not establish that it would eliminate the bottleneck. VSync and frame pacing
+also need measurement rather than assuming a fixed 60-to-30 FPS transition.
 
 ### Installation on Switch
 1. Download or compile `gt3r.nro`.

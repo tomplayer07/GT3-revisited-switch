@@ -17,6 +17,7 @@ class Occluder {
 public:
     // Adds a model's opaque, non-additive LOD-0 triangles (mesh transforms applied).
     void add(const scene::Model& model);
+    void add_opaque_body(const scene::Model& model); // conservative car-lamp blocker, excludes glass/cutouts
     void build(float cell = 16.0f);
     bool empty() const { return tris_.empty(); }
     // True if the ray from `o` along unit `d` hits a triangle within `max_dist`.

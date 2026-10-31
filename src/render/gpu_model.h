@@ -8,6 +8,8 @@
 #include "render/gpu_context.h"
 #include "render/math3d.h"
 #include "scene/model.h"
+#include "render/vertex_upload_cache.h"
+#include "render/texture_rotation.h"
 
 #include <vector>
 
@@ -62,6 +64,9 @@ public:
     };
     struct TextureInfo {
         SDL_GPUTexture* texture = nullptr;
+#if defined(__SWITCH__)
+        TextureRotation<SDL_GPUTexture*> rotation;
+#endif
         bool clamp_u = false, clamp_v = false;
         bool no_mips = false; // scene::Texture::no_mips
         u32 width = 0, height = 0;
@@ -97,6 +102,10 @@ private:
     SDL_GPUTransferBuffer* staging_ = nullptr;
     u32 staging_capacity_ = 0;
     std::vector<u32> uploaded_indices_; // update_geometry: the index buffer's contents
+#if defined(__SWITCH__)
+    VertexUploadCache uploaded_vertices_;
+    TextureUploadBatch texture_batch_;
+#endif
 };
 
 } // namespace gt3r::render

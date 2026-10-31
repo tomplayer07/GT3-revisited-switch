@@ -1250,7 +1250,8 @@ void AnimatedNodes::reset() {
     update(0.0f);
 }
 
-void AnimatedNodes::update(float seconds) {
+bool AnimatedNodes::update(float seconds) {
+    bool changed = false;
     for (size_t i = 0; i < animators_.size(); ++i) {
         const Gtm1::Animator& a = animators_[i];
         float& v = values_[i];
@@ -1280,8 +1281,13 @@ void AnimatedNodes::update(float seconds) {
         } else {
             continue; // (type 6: none on the disc)
         }
-        for (u32 t : a.targets) operands_[t] = out;
+        for (u32 t : a.targets) {
+            auto [it, inserted] = operands_.try_emplace(t, out);
+            if (inserted || it->second != out) changed = true;
+            it->second = out;
+        }
     }
+    return changed;
 }
 
 std::vector<scene::Mesh> AnimatedNodes::meshes() const {

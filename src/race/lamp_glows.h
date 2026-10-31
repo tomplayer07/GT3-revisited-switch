@@ -139,6 +139,8 @@ struct CarLampSet {
     bool empty() const { return head.empty() && tail.empty() && brake.empty(); }
 };
 
+class Occluder;
+
 class CarLampGlows {
 public:
     ~CarLampGlows();
@@ -150,6 +152,7 @@ public:
         render::Mat4 model; // car (model) frame -> world
         float k = 0;        // lamp factor k/4
         bool brake_now = false;
+        const Occluder* body = nullptr; // opaque panels in car-local coordinates
     };
     // `lines`: as LampGlows::draw.
     void draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Mat4& view, const render::Vec3& eye, float fovy,

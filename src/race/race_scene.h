@@ -145,6 +145,7 @@ public:
     // The GTCI lamp lists (headlamps, tail and brake lamps) in the model frame, and the
     // model frame -> world for a state (the body as drawn).
     const CarLampSet& lamps() const { return lamps_; }
+    const Occluder& lamp_occluder() const { return lamp_occluder_; }
     // The car's camera mounts (GTCI): view mode 1's car-mounted shots.
     const std::vector<CarMount>& mounts() const { return mounts_; }
     render::Mat4 body_matrix(const sim::VehicleState& s, const sim::VehicleSetup& setup) const;
@@ -166,6 +167,7 @@ private:
     };
     mutable std::array<Morph, 2> morph_;
     CarLampSet lamps_;
+    Occluder lamp_occluder_;
     std::vector<CarMount> mounts_;
     std::array<std::unique_ptr<render::GpuModel>, 4> wheels_;
     std::array<std::unique_ptr<render::GpuModel>, 4> bands_; // the tyres' arch shade (does not spin)

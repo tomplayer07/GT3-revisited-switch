@@ -15,6 +15,7 @@
 #include "render/camera.h"
 #include "render/gpu_context.h"
 #include "render/gpu_model.h"
+#include "render/uniform_staging.h"
 
 #include <algorithm>
 #include <array>
@@ -322,6 +323,16 @@ private:
         std::vector<SDL_GPUTexture*> frames;
     } capture_;
 #if defined(__SWITCH__)
+    struct GlDraw {
+        const GpuModel* model;
+        s32 vertex_offset;
+        u32 first_index, index_count;
+        GLuint texture, sampler;
+        int cull, blend, depth_mask, color_mask;
+        std::array<size_t, 3> uniforms;
+    };
+    std::vector<GlDraw> gl_draws_;
+    UniformStaging gl_uniforms_[3];
     GLuint fbo_ = 0;
     GLuint color_tex_ = 0;
     GLuint depth_rb_ = 0;

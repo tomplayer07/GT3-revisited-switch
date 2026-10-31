@@ -180,3 +180,44 @@ TEST(clut_animation_bad_table_ignored) {
     put32(d, 0x24, 0);
     CHECK(Tex1::parse(d).clut_animations.empty());
 }
+
+TEST(clut_textures_ignore_unused_animated_entries) {
+    Bytes data = synthetic_set();
+    // Every texel uses entry 1. Entry 1 stays constant while animated entry 2 changes.
+    for (size_t i = 0; i < 8; ++i) data[0xC0 + i] = 0x11;
+    for (size_t f = 0; f < 3; ++f) put32(data, 0x160 + 8 * f, 0x80402010u);
+    ClutTextures textures(data);
+    const auto before = *textures.rgba(0);
+    textures.player().update(0.25f);
+    CHECK(textures.refresh().empty());
+    CHECK(*textures.rgba(0) == before);
+    textures.player().update(0.25f);
+    CHECK(textures.refresh().empty());
+    CHECK(*textures.rgba(0) == before);
+}
+
+TEST(clut_textures_ignore_alpha_when_tcc_is_off) {
+    Bytes data = synthetic_set();
+    put64(data, 0x30, rd64(data, 0x30) & ~(1ull << 34));
+    for (size_t f = 0; f < 3; ++f) {
+        put32(data, 0x160 + 8 * f, (u32(f * 64) << 24) | 0x00402010u);
+        put32(data, 0x164 + 8 * f, (u32(f * 64) << 24) | 0x00102030u);
+    }
+    ClutTextures textures(data);
+    const auto before = *textures.rgba(0);
+    textures.player().update(0.25f);
+    CHECK(textures.refresh().empty());
+    CHECK(*textures.rgba(0) == before);
+    for (u32 pixel : *textures.rgba(0)) CHECK((pixel >> 24) == 255);
+}
+
+TEST(clut_textures_changed_used_entry_still_refreshes_after_reset) {
+    ClutTextures textures(synthetic_set());
+    const auto before = *textures.rgba(0);
+    textures.player().update(0.5f);
+    CHECK(textures.refresh() == std::vector<u32>{0});
+    CHECK(*textures.rgba(0) != before);
+    textures.player().reset();
+    CHECK(textures.refresh() == std::vector<u32>{0});
+    CHECK(*textures.rgba(0) == before);
+}

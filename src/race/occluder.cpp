@@ -28,6 +28,27 @@ void Occluder::add(const scene::Model& model) {
     }
 }
 
+void Occluder::add_opaque_body(const scene::Model& model) {
+    scene::Model solid = model;
+    for (scene::Mesh& mesh : solid.meshes) {
+        std::erase_if(mesh.primitives, [&](const scene::Primitive& p) {
+            if (p.flags & (scene::kAlphaBlend | scene::kAlphaOnly)) return true;
+            if (!(p.flags & scene::kAlphaTest)) return false;
+            const float ref = p.alpha_ref >= 0 ? p.alpha_ref : 0.5f;
+            // Do not turn texture holes into an opaque car panel. A conservative
+            // whole-primitive test can leave some leaks, but never fills a cutout.
+            if (p.texture >= 0 && size_t(p.texture) < model.textures.size())
+                for (u32 c : model.textures[size_t(p.texture)].rgba)
+                    if (float(c >> 24) / 255.0f <= ref) return true;
+            for (u32 i = p.first_index; i < mesh.indices.size() && i < p.first_index + p.index_count; ++i)
+                if (mesh.indices[i] < mesh.vertices.size() &&
+                    float(mesh.vertices[mesh.indices[i]].color >> 24) / 255.0f <= ref) return true;
+            return false;
+        });
+    }
+    add(solid);
+}
+
 void Occluder::build(float cell) {
     cells_.clear();
     if (tris_.empty()) return;
