@@ -93,6 +93,9 @@ To help future contributors understand what has already been tried and where the
    - **Problem**: Over 280 point lamps and flares were evaluated every frame with BVH occluder raycasts and 2D sprite blending.
    - **Optimization**: Simplified occlusion tests on Switch and culled lamp halos/glows beyond 450 meters.
 
+6. **Tuned Track Draw Distance (`src/app/screen_race_render.cpp`)**:
+   - **Optimization**: Reduced the global track draw distance from upstream's 2,500 meters down to **650 meters** on Switch. This culls distant scenery that is invisible or imperceptible on a 720p handheld screen, preventing unnecessary vertex transformations and frustum checks.
+
 #### 💡 Open Areas for Further Optimization (Help Wanted!)
 If you are an experienced Switch homebrew or graphics developer:
 - **Point-Light Mode / Shaders**: On night courses (`point_lights_`), vertex and fragment shaders compute quadratic light attenuation for multiple lights. Adding a Switch-specific flat/directional night lighting mode could instantly push Route 5 to 60 FPS.
