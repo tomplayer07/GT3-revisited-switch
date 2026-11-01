@@ -644,10 +644,32 @@ bool write_save(const std::string& path, const GameState& s, std::string* error)
         if (error) *error = "cannot write " + tmp;
         return false;
     }
+    // libnx refuses rename-over-existing even though SDL promises replacement.
+    // Keep the last complete save before removing the destination. A failed
+    // replacement restores it; the backup also survives an interrupted write.
+#if defined(__SWITCH__)
+    const std::string backup = path + ".bak";
+    const bool replacing = host_path_exists(path);
+    if (replacing) {
+        if (!SDL_CopyFile(path.c_str(), backup.c_str())) {
+            if (error) *error = "cannot back up " + path + ": " + SDL_GetError();
+            return false;
+        }
+        if (!SDL_RemovePath(path.c_str())) {
+            if (error) *error = "cannot replace " + path + ": " + SDL_GetError();
+            return false;
+        }
+    }
+#endif
     // SDL_RenamePath takes UTF-8 on every platform (std::filesystem would use
-    // the ANSI code page on Windows) and replaces an existing file.
+    // the ANSI code page on Windows).
     if (!SDL_RenamePath(tmp.c_str(), path.c_str())) {
-        if (error) *error = "cannot rename to " + path + ": " + SDL_GetError();
+        std::string reason = "cannot rename to " + path + ": " + SDL_GetError();
+#if defined(__SWITCH__)
+        if (replacing && !SDL_CopyFile(backup.c_str(), path.c_str()))
+            reason += "; restore failed (previous save at " + backup + "): " + SDL_GetError();
+#endif
+        if (error) *error = reason;
         return false;
     }
     return true;
@@ -655,6 +677,11 @@ bool write_save(const std::string& path, const GameState& s, std::string* error)
 
 std::optional<GameState> read_save(const std::string& path, std::string* error) {
     std::optional<Bytes> b = read_host_file(path);
+#if defined(__SWITCH__)
+    // A power loss between removing the old file and renaming the complete
+    // temporary file leaves the previous save in the backup.
+    if (!b && !host_path_exists(path)) b = read_host_file(path + ".bak");
+#endif
     if (!b) {
         if (error) *error = "no save at " + path;
         return std::nullopt;

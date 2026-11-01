@@ -636,6 +636,12 @@ void SavePage::draw(const MenuSet::PageRef& ref, std::vector<ElementDraw>& out) 
     case Phase::Error:
         if (result_ == WriteError) {
             layer("writeerror");
+            // Some disc layouts provide only the red write-error background.
+            // Reuse the read-error text's layout so a failed save is explained.
+            const std::string message = "Unable to save.\nCheck available space and try again.";
+            const Element* message_element = el("readerror_text_file_damage");
+            if (!message_element) message_element = el("confirm2_text_overwrite");
+            put(message_element, 0, 0, nullptr, &message);
             put(el("writeerror_m_ok"));
         } else {
             layer("readerror");

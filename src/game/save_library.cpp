@@ -54,7 +54,21 @@ bool same_save_file(const std::string& a, const std::string& b) {
     return x == y;
 }
 
-SaveLibrary::SaveLibrary(std::string dir, bool tracked) : dir_(with_sep(std::move(dir))), tracked_(tracked) {}
+SaveLibrary::SaveLibrary(std::string dir, bool tracked) : dir_(with_sep(std::move(dir))), tracked_(tracked) {
+#if defined(__SWITCH__)
+    // Recover a replacement interrupted after the old file was removed. Restore
+    // only missing saves, and only from a backup that parses successfully.
+    int count = 0;
+    if (char** names = SDL_GlobDirectory(dir_.c_str(), "*.sav.bak", SDL_GLOB_CASEINSENSITIVE, &count)) {
+        for (int i = 0; i < count; ++i) {
+            const std::string backup = dir_ + names[i];
+            const std::string path = backup.substr(0, backup.size() - 4);
+            if (!host_path_exists(path) && read_save(backup)) SDL_CopyFile(backup.c_str(), path.c_str());
+        }
+        SDL_free(names);
+    }
+#endif
+}
 
 std::string SaveLibrary::user_dir(Region region) {
     std::string dir = user_data_dir() + "saves/";

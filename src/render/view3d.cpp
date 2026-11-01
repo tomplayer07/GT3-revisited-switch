@@ -1407,17 +1407,48 @@ SDL_GPUTexture* View3D::render_offscreen(int slot, int w, int h, const Mat4& vie
 }
 
 void View3D::release_cube() {
+#if defined(__SWITCH__)
+    GLuint cube = GLuint(uintptr_t(cube_)), depth = GLuint(uintptr_t(cube_depth_));
+    if (cube) glDeleteTextures(1, &cube);
+    if (depth) glDeleteRenderbuffers(1, &depth);
+    cube_ = cube_depth_ = nullptr;
+#else
     SDL_GPUDevice* dev = ctx_.device();
     for (SDL_GPUTexture** t : {&cube_, &cube_depth_, &cube_msaa_[0], &cube_msaa_[1], &cube_msaa_[2], &cube_msaa_[3],
                                &cube_msaa_[4], &cube_msaa_[5]}) {
         if (*t) SDL_ReleaseGPUTexture(dev, *t);
         *t = nullptr;
     }
+#endif
 }
 
 bool View3D::ensure_cube(int size) {
 #if defined(__SWITCH__)
-    return true;
+    if (cube_ && size == cube_size_) return true;
+    release_cube();
+    GLuint cube = 0, depth = 0;
+    glActiveTexture(GL_TEXTURE1);
+    glGenTextures(1, &cube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 0);
+    for (int f = 0; f < 6; ++f)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glGenRenderbuffers(1, &depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size, size);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, ctx_.gl_dummy_cube());
+    glActiveTexture(GL_TEXTURE0);
+    cube_ = (SDL_GPUTexture*)(uintptr_t)cube;
+    cube_depth_ = (SDL_GPUTexture*)(uintptr_t)depth;
+    cube_size_ = size;
+    LOG_INFO("Switch reflection cube created: %dx%d", size, size);
+    return cube && depth;
 #else
     if (cube_ && size == cube_size_ && cube_samples_ == ctx_.msaa()) return true;
     SDL_GPUDevice* dev = ctx_.device();
@@ -1458,8 +1489,67 @@ bool View3D::ensure_cube(int size) {
 SDL_GPUTexture* View3D::render_env_cube(const Vec3& pos, const std::vector<DrawItem>& items, const DrawOptions& opt,
                                         int size, unsigned faces) {
 #if defined(__SWITCH__)
-    (void)pos; (void)items; (void)opt; (void)size; (void)faces;
-    return (SDL_GPUTexture*)(uintptr_t)ctx_.gl_dummy_cube();
+    if (!ensure_cube(size)) return nullptr;
+    GLint prev_fbo = 0, prev_prog = 0, prev_vao = 0, viewport[4];
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, GLuint(uintptr_t(cube_depth_)));
+    glBindVertexArray(ctx_.gl_vao());
+    glUseProgram(ctx_.gl_program());
+    glViewport(0, 0, size, size);
+    glDisable(GL_SCISSOR_TEST);
+    glFrontFace(GL_CCW);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GEQUAL);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, ctx_.gl_dummy_cube());
+    glBindSampler(1, ctx_.gl_sampler(3));
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, ctx_.gl_white());
+    glBindSampler(2, ctx_.gl_sampler(3));
+    glActiveTexture(GL_TEXTURE0);
+    // OpenGL cubemap row zero is the bottom row of a render target.
+    static const Vec3 dir[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    static const Vec3 up[6] = {{0,-1,0},{0,-1,0},{0,0,1},{0,0,-1},{0,-1,0},{0,-1,0}};
+    Mat4 proj = perspective(1.5707963f, 1.0f, 0.1f, std::max(opt.draw_distance, 10.0f) * 1.5f);
+    DrawOptions o = opt;
+    o.env_cube = o.env_sphere = nullptr;
+    DrawStats keep = stats_;
+    bool ok = true;
+    for (int f = 0; f < 6; ++f) {
+        if (!(faces & (1u << f))) continue;
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, GLuint(uintptr_t(cube_)), 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { ok = false; break; }
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(o.clear[0], o.clear[1], o.clear[2], 1.0f);
+        glClearDepthf(0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        encode_gles3(look_at(pos, pos + dir[f], up[f]), proj, pos, items, o);
+    }
+    stats_ = keep;
+    glBindSampler(0, 0); glBindSampler(1, 0); glBindSampler(2, 0);
+    glBindVertexArray(prev_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+    glDeleteFramebuffers(1, &fbo);
+    glUseProgram(prev_prog);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    glDisable(GL_BLEND); glDisable(GL_CULL_FACE); glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    if (!ok) {
+        LOG_WARN("Switch reflection cube framebuffer incomplete");
+        release_cube();
+        return nullptr;
+    }
+    return cube_;
 #else
     if (!ensure_cube(size)) return nullptr;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx_.device());
@@ -1539,6 +1629,7 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
     }
 
     FragmentUniforms fu{};
+    fu.output[0] = opt.quantize_rgb5 ? 1.0f : 0.0f;
     fu.light_dir[0] = opt.light_dir.x; fu.light_dir[1] = opt.light_dir.y; fu.light_dir[2] = opt.light_dir.z;
     fu.camera_pos[0] = eye.x; fu.camera_pos[1] = eye.y; fu.camera_pos[2] = eye.z; fu.camera_pos[3] = 1.0f;
     for (int i = 0; i < 3; ++i) {
@@ -1754,6 +1845,13 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
             fu.params[2] = reflection ? opt.reflection_strength : (p.flags & scene::kEnvironmentMap) ? opt.env_strength : 0.0f;
             if (reflection) fu.params[2] *= v.item->reflection_scale;
             fu.params[3] = reflection ? 3.0f : sheen ? 2.0f : 0.0f;
+            // Prize models use their own sphere-map texture. Match the renderer's GPU path:
+            // mode 4 samples that texture with the reflected view-space normal, while additive
+            // layers are weighted by the framebuffer alpha from the base pass.
+            if (v.item->sphere_map && (p.flags & scene::kEnvironmentMap) && textured) {
+                fu.params[2] = (p.flags & scene::kAdditive) ? 1.0f : 0.0f;
+                fu.params[3] = 4.0f;
+            }
 
             fu.env_c0[3] = p.env_rows ? 1.0f : 0.0f;
             for (int i = 0; i < 3; ++i) fu.env_c0[i] = p.env_c0[i], fu.env_c1[i] = p.env_c1[i];

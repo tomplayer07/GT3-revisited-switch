@@ -11,9 +11,6 @@ namespace gt3r::race_screen {
 // sphere map every frame; we render a cube): course only, 0.8 m above the player's car,
 // scenery within 200 m. [video] car_reflections = off falls back to the sky/scenery gradient.
 bool RaceScreen::update_env_cube() {
-#if defined(__SWITCH__)
-    return false;
-#endif
     if (!env_cube_on_ || !view_ || !course_scene_) return false;
     const sim::Vec3& p = render_state_.position;
     render::Vec3 pos{p.x, p.y + 0.8f, p.z};
@@ -51,7 +48,14 @@ bool RaceScreen::update_env_cube() {
         o.quantize_rgb5 = true;
         for (int i = 0; i < 3; ++i) o.clear[i] = 0;
     }
+#if defined(__SWITCH__)
+    SDL_FlushRenderer(app_->renderer());
+    static unsigned next_face = 0;
+    const unsigned faces = view_->env_cube() ? 1u << (next_face++ % 6) : 0x3Fu;
+    return view_->render_env_cube(pos, env_items_, o, 64, faces) != nullptr;
+#else
     return view_->render_env_cube(pos, env_items_, o, 128) != nullptr;
+#endif
 }
 
 // Rear-view mirror (onboard cameras; GT3: frame rect (200, 20) 240x64 with a 1 px black
