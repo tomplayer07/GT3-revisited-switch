@@ -367,3 +367,41 @@ passed every test):
   default. Settings → Display → Limit to 60 fps (`[video] limit_60fps = on`)
   draws every Nth refresh on 120 Hz and faster displays (120 Hz → 60 fps,
   144 → 72) through SDL's main loop rate; checked on a 120 Hz Mac display.
+
+
+### Switch AUDOUT queue correction
+
+The [homebrew SDL 3.4.0 backend](https://github.com/neomody77/sdl3-switch)
+used by this fork allocated two AUDOUT buffers,
+but waited after every submission, leaving only one in flight. This can cause
+playback gaps while SDL prepares the next block. The patch in
+`cmake/patches/sdl-switch-audio-queue.patch` fills both slots and reuses only the
+buffer tag returned by libnx. It covers all SDL output, including movies.
+A console listening test on 2026-11-01 reported clean audio after this change.
+The retrieved log confirmed the queued driver was active and contained no
+AUDOUT or music-stream errors. This validates that console session; broader
+hardware testing is still useful.
+
+Build a patched archive inside the devkitPro environment, using the exact SDL
+source/build that produced the installed archive (paths below are examples):
+
+```sh
+python3 tools/switch/patch_sdl_audio.py \
+  --source /Desktop/SDL3-test --build /Desktop/SDL3-test/build-switch \
+  --library /Desktop/switch-portlibs/lib/libSDL3.a \
+  --output build-switch/sdl-audio-fixed
+python3 tools/switch/test_audio_queue.py \
+  build-switch/sdl-audio-fixed/src/audio/switch/SDL_switchaudio.c
+cmake -S . -B build-switch \
+  -DGT3R_SWITCH_SDL_LIBRARY=/Desktop/GT3-revisited/build-switch/sdl-audio-fixed/libSDL3.a
+cmake --build build-switch --target gt3r -j6
+```
+
+The script checks that the installed driver object matches the supplied SDL
+build, patches copies of the source files, and replaces that object in a copy
+of the archive. Installed SDL files are untouched. The startup log identifies
+this configuration as `Switch audio: queued AUDOUT driver`. To compare against
+the original driver, configure `-DGT3R_SWITCH_SDL_LIBRARY=` and rebuild.
+The synthetic queue checks exercise startup priming, sustained playback,
+returned tags, spurious wakeups, submission/wait failures and buffer ownership;
+they do not measure audible output or scheduling stalls on the console.

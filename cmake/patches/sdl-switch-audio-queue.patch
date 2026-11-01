@@ -1,0 +1,77 @@
+--- a/src/audio/switch/SDL_switchaudio.c
++++ b/src/audio/switch/SDL_switchaudio.c
+@@ -18,6 +18,7 @@
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+ */
++// Modified for GT3 Revisited: keep both AUDOUT buffers queued.
+ #include "SDL_internal.h"
+ 
+ #ifdef SDL_AUDIO_DRIVER_SWITCH
+@@ -121,25 +122,48 @@
+ {
+     AudioOutBuffer *b = &device->hidden->buffers[device->hidden->next];
+ 
++    if (device->hidden->queued[device->hidden->next]) {
++        return SDL_SetError("AUDOUT buffer still queued");
++    }
+     SDL_memcpy(b->buffer, buffer, buflen);
+     b->data_size = (u64)buflen;
+-    device->hidden->next = (device->hidden->next + 1) % NUM_AUDIO_BUFFERS;
+ 
+     if (R_FAILED(audoutAppendAudioOutBuffer(b))) {
+         return SDL_SetError("audoutAppendAudioOutBuffer() failed");
+     }
++    device->hidden->queued[device->hidden->next] = true;
+     return true;
+ }
+ 
+ static bool SWITCHAUDIO_WaitDevice(SDL_AudioDevice *device)
+ {
+-    AudioOutBuffer *released = NULL;
+-    u32 released_count = 0;
+-    (void)device;
+-    if (R_FAILED(audoutWaitPlayFinish(&released, &released_count, UINT64_MAX))) {
+-        return SDL_SetError("audoutWaitPlayFinish() failed");
+-    }
+-    return true;
++    for (;;) {
++        // SDL calls WaitDevice after each submission. Fill every free slot before
++        // waiting, so the next block can be mixed while AUDOUT plays the other.
++        for (int i = 0; i < NUM_AUDIO_BUFFERS; ++i) {
++            if (!device->hidden->queued[i]) {
++                device->hidden->next = i;
++                return true;
++            }
++        }
++        AudioOutBuffer *released = NULL;
++        u32 released_count = 0;
++        if (R_FAILED(audoutWaitPlayFinish(&released, &released_count, UINT64_MAX))) {
++            return SDL_SetError("audoutWaitPlayFinish() failed");
++        }
++        if (!released_count) continue;
++        // libnx retrieves one buffer tag per call. Match that tag rather than
++        // assuming release order, and never write into a buffer still in flight.
++        bool found = false;
++        for (int i = 0; i < NUM_AUDIO_BUFFERS; ++i) {
++            if (released == &device->hidden->buffers[i]) {
++                device->hidden->queued[i] = false;
++                found = true;
++                break;
++            }
++        }
++        if (!found) return SDL_SetError("Unknown AUDOUT buffer released");
++    }
+ }
+ 
+ static void SWITCHAUDIO_CloseDevice(SDL_AudioDevice *device)
+--- a/src/audio/switch/SDL_switchaudio.h
++++ b/src/audio/switch/SDL_switchaudio.h
+@@ -32,6 +32,7 @@
+ {
+     Uint8 *mixbuf;                            // buffer SDL fills each iteration
+     AudioOutBuffer buffers[NUM_AUDIO_BUFFERS]; // libnx AUDOUT buffer pool
++    bool queued[NUM_AUDIO_BUFFERS];             // owned by AUDOUT until released
+     int next;                                  // next pool slot to submit
+ };
+ 

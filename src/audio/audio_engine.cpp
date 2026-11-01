@@ -92,6 +92,9 @@ AudioEngine::AudioEngine(const std::string& device) : device_name_(device) {
         return;
     }
     SDL_SetAudioStreamGain(music_stream_, stream_output_gain(stream_level_, music_volume_) * stream_trim_);
+#if defined(GT3R_SWITCH_AUDIO_QUEUE_FIX)
+    LOG_INFO("Switch audio: queued AUDOUT driver (two buffers in flight)");
+#endif
     // The voices play at unity gain: the volumes are the mixer's bus gains.
 }
 
