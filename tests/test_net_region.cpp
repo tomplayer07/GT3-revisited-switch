@@ -10,8 +10,10 @@
 
 #include "disc/volume.h"
 #include "game/data/car_database.h"
+#include "game/data/mod_cars.h"
 #include "game/gt_mode.h"
 #include "game/gt_parts.h"
+#include "game/gt_setting.h"
 #include "game/gt_state.h"
 #include "game/net_car.h"
 #include "base/sha256.h"
@@ -19,11 +21,13 @@
 #include "disc/disc.h"
 #include "sim/car_spec.h"
 #include "sim/exact/program_data.h"
+#include "vfs/vfs.h"
 
 #include <cmath>
 #include <cstdio>
 #include <map>
 #include <set>
+#include <tuple>
 
 using namespace gt3r;
 using game::CarHere;
@@ -91,6 +95,73 @@ TEST(net_car_digest_wire) {
         std::optional<game::OnlineCar> td = game::decode_online_car(ByteSpan(now.data(), now.size() - 1));
         CHECK(td && !td->digest);
     }
+
+    // A mod car bought in GT Mode: a garage car whose package and donor trail the digest.
+    game::OnlineCar gm = g;
+    gm.car = "mod_x";
+    gm.digest.emplace();
+    gm.digest->fill(0x33);
+    game::OnlineCar plain = gm; // as an older game sends it: no package
+    gm.package = std::string(64, 'e');
+    gm.package_size = 4321;
+    gm.donor = "syn_a";
+    const Bytes old = game::encode_online_car(plain), now = game::encode_online_car(gm);
+    CHECK(now.size() == old.size() + 1 + 64 + 4 + 1 + 5 && std::equal(old.begin(), old.end(), now.begin()));
+    CHECK(now.size() < game::kMaxOnlineCarBytes);
+    // 0.5.0's decoder is this one without the fields after the digest: it reads up to the digest and ignores the rest,
+    // which is reading the bytes up to the digest. The same garage car, with its digest.
+    std::optional<game::OnlineCar> as_old = game::decode_online_car(ByteSpan(now.data(), old.size()));
+    CHECK(as_old && as_old->kind == game::OnlineCar::Kind::Garage && as_old->car == "mod_x" && as_old->parts == gm.parts &&
+          as_old->digest == gm.digest && as_old->package.empty() && as_old->donor.empty());
+    // This game reads the package and the donor.
+    std::optional<game::OnlineCar> nd = game::decode_online_car(now);
+    CHECK(nd && nd->kind == game::OnlineCar::Kind::Garage && nd->parts == gm.parts && nd->engine_wear_m == 1000 &&
+          nd->digest == gm.digest && nd->package == gm.package && nd->package_size == 4321 && nd->donor == "syn_a");
+    CHECK(nd && game::online_car_is_mod(*nd) && game::encode_online_car(*nd) == now);
+    // An older game's descriptor: no package (a garage car, not a mod car to download).
+    std::optional<game::OnlineCar> od = game::decode_online_car(old);
+    CHECK(od && od->digest && od->package.empty() && od->package_size == 0 && !game::online_car_is_mod(*od));
+    // Without a digest neither is sent: the decoder would read their bytes as the digest.
+    game::OnlineCar nodig = gm;
+    nodig.digest.reset(), plain.digest.reset();
+    CHECK(game::encode_online_car(nodig) == game::encode_online_car(plain));
+    // What follows them is ignored, as 0.5.0 ignores what follows the digest.
+    Bytes more = now;
+    more.push_back(7);
+    std::optional<game::OnlineCar> md = game::decode_online_car(more);
+    CHECK(md && md->package == gm.package && md->donor == "syn_a" && game::encode_online_car(*md) == now);
+    // Malformed: a truncated package or donor, a bad hash.
+    CHECK(!game::decode_online_car(ByteSpan(now.data(), now.size() - 1)));
+    CHECK(!game::decode_online_car(ByteSpan(now.data(), old.size() + 1)));
+    CHECK(!game::decode_online_car(ByteSpan(now.data(), old.size() + 1 + 64 + 4)));
+    gm.package = "zz";
+    CHECK(!game::decode_online_car(game::encode_online_car(gm)));
+
+    // A mod car from the list: its donor trails the digest.
+    game::OnlineCar ml = m;
+    ml.package_size = 99;
+    ml.digest = gm.digest;
+    const Bytes ml_old = game::encode_online_car(ml); // as 0.5.0 sends it: no donor
+    ml.donor = "syn_a";
+    const Bytes ml_now = game::encode_online_car(ml);
+    CHECK(ml_now.size() == ml_old.size() + 1 + 5 && std::equal(ml_old.begin(), ml_old.end(), ml_now.begin()));
+    std::optional<game::OnlineCar> ml_as_old = game::decode_online_car(ByteSpan(ml_now.data(), ml_old.size()));
+    CHECK(ml_as_old && ml_as_old->kind == game::OnlineCar::Kind::Mod && ml_as_old->package == m.package &&
+          ml_as_old->package_size == 99 && ml_as_old->digest == gm.digest && ml_as_old->donor.empty());
+    std::optional<game::OnlineCar> ml_d = game::decode_online_car(ml_now);
+    CHECK(ml_d && ml_d->donor == "syn_a" && ml_d->package == m.package && game::encode_online_car(*ml_d) == ml_now);
+    CHECK(!game::decode_online_car(ByteSpan(ml_now.data(), ml_now.size() - 1)));
+    ml.digest.reset();
+    CHECK(game::encode_online_car(ml) == Bytes(ml_old.begin(), ml_old.end() - 32)); // no digest: no donor
+
+    // The other kinds send nothing after the digest.
+    for (game::OnlineCar c : {a, d}) {
+        c.digest = gm.digest;
+        const Bytes b = game::encode_online_car(c);
+        c.package = std::string(64, 'e');
+        c.donor = "syn_a";
+        CHECK(game::encode_online_car(c) == b);
+    }
 }
 
 TEST(net_car_params_digest) {
@@ -153,7 +224,7 @@ TEST(net_car_params_digest_platform_hash) {
     // The same bytes on every platform (arm64, x86-64; fp contraction on or off): the lobby compares digests exactly.
     const u64 h = params_digest_hash();
     std::printf("  parameter block digests: %016llx\n", (unsigned long long)h);
-    CHECK(h == 0x08df94000f9ad8bcull);
+    CHECK(h == 0xb2bd4ee5d67b3977ull);
 }
 
 TEST(net_car_here_regions) {
@@ -245,6 +316,351 @@ TEST(net_car_here_regions) {
     mod.package = std::string(64, 'd');
     CHECK(here_on(*here, wire(mod), all) == CarHere::ModMissing);
     CHECK(!game::car_here_blocks(CarHere::ModMissing) && !game::car_here_blocks(CarHere::Ok));
+}
+
+namespace {
+
+namespace cardb = test::cardb;
+
+// A part record of `car`: id `label`, stage +0x10.
+Bytes part_record(data::CarDatabase& db, const std::string& label, const std::string& car, u8 stage, size_t size) {
+    db.add_label(label);
+    Bytes r(size);
+    cardb::put64(r, 0, db::id_hash(label));
+    cardb::put64(r, 8, db::id_hash(car));
+    r[0x10] = stage;
+    return r;
+}
+
+// Car syn_t (cardb::add_car) and its INVENTED tune shop: a stock gearbox with stored ratios and an adjustable one with
+// generated ratios, a racing suspension with setting ranges, an NA tune (+500 rpm), a turbo kit, stock and medium tyres
+// of two sizes; and a racing suspension made for another car (syn_o).
+std::unique_ptr<data::CarDatabase> tuning_db() {
+    auto db = cardb::empty_database();
+    if (!db) return db;
+    cardb::add_car(*db, "syn_t", 300, 75, "zz0001");
+    const ByteSpan* stock_su = db->record(data::TableId::Suspension, "su_syn_t");
+    if (!stock_su) return nullptr;
+    const Bytes stock(stock_su->begin(), stock_su->end()); // (put_record moves the table's records)
+    for (const char* car : {"syn_t", "syn_o"}) {
+        Bytes su = stock;
+        const std::string label = std::string("su_") + car + "_racing";
+        db->add_label(label);
+        cardb::put64(su, 0, db::id_hash(label));
+        cardb::put64(su, 8, db::id_hash(car));
+        su[0x10] = 3;                                    // racing kit: bound and rebound
+        su[0x11] = 0, su[0x12] = 30, su[0x13] = 10;      // front camber 0..30, stock 10
+        su[0x14] = 0, su[0x15] = 30, su[0x16] = 10;      // rear camber
+        su[0x17] = 120, su[0x18] = 136, su[0x19] = 128;  // front toe
+        su[0x1A] = 120, su[0x1B] = 136, su[0x1C] = 128;  // rear toe
+        su[0x21] = 40, su[0x22] = 120, su[0x23] = 60;    // front springs 4.0..12.0 kgf/mm, stock 6.0
+        su[0x24] = 45, su[0x25] = 130, su[0x26] = 70;    // rear springs
+        for (size_t o : {0x2B, 0x32, 0x39, 0x40}) su[o] = 8; // damper steps
+        for (size_t o : {0x2E, 0x31, 0x35, 0x38, 0x3C, 0x3F, 0x43, 0x46}) su[o] = 4;
+        su[0x47] = su[0x4B] = 7, su[0x4A] = su[0x4E] = 4; // stabilizers
+        cardb::put16(su, 0x50, 100), cardb::put16(su, 0x52, 140); // front ride height 100..140 mm (stock 120)
+        cardb::put16(su, 0x56, 100), cardb::put16(su, 0x58, 140);
+        db->put_record(data::TableId::Suspension, std::move(su));
+    }
+    Bytes ge = part_record(*db, "ge_syn_t", "syn_t", 0, 0x30); // stored ratios, final 4.000 (no final range)
+    ge[0x11] = 5;
+    cardb::put16(ge, 0x12, 3300);
+    const u16 ratios[5] = {3200, 2000, 1400, 1050, 820};
+    for (size_t i = 0; i < 5; ++i) cardb::put16(ge, 0x14 + 2 * i, ratios[i]);
+    cardb::put16(ge, 0x22, 4000), cardb::put16(ge, 0x24, 4000), cardb::put16(ge, 0x26, 4000);
+    db->put_record(data::TableId::Gear, std::move(ge));
+    Bytes full = part_record(*db, "ge_syn_t_full", "syn_t", 3, 0x30); // generated: final 2.500..5.500, auto level 18..42
+    full[0x11] = 6;
+    cardb::put16(full, 0x22, 4111), cardb::put16(full, 0x24, 5500), cardb::put16(full, 0x26, 2500);
+    full[0x28] = 1, full[0x29] = 25, full[0x2A] = 18, full[0x2B] = 42;
+    db->put_record(data::TableId::Gear, std::move(full));
+    for (auto [label, rim, aspect, width] : {std::tuple{"sz_syn_16", 16, 9, 45}, std::tuple{"sz_syn_17", 17, 8, 49}}) {
+        db->add_label(label);
+        Bytes sz(0x10);
+        cardb::put64(sz, 0, db::id_hash(label));
+        sz[0x08] = u8(rim), sz[0x09] = u8(aspect), sz[0x0A] = u8(width);
+        db->put_record(data::TableId::TireSize, std::move(sz));
+    }
+    for (auto [table, prefix] : {std::pair{data::TableId::FrontTire, "ft_syn_t"}, std::pair{data::TableId::RearTire, "rt_syn_t"}})
+        for (auto [suffix, stage, size] : {std::tuple{"", 0, "sz_syn_16"}, std::tuple{"_m", 5, "sz_syn_17"}}) {
+            Bytes t = part_record(*db, std::string(prefix) + suffix, "syn_t", u8(stage), 0x60);
+            cardb::put64(t, 0x18, db::id_hash(size));
+            db->put_record(table, std::move(t));
+        }
+    Bytes nt = part_record(*db, "nt_syn_t_1", "syn_t", 1, 0x20);
+    nt[0x12] = 5; // rev limit +500 rpm
+    db->put_record(data::TableId::NaTune, std::move(nt));
+    Bytes tk = part_record(*db, "tk_syn_t_1", "syn_t", 1, 0x20);
+    tk[0x11] = 1, tk[0x12] = 12, tk[0x13] = 30, tk[0x14] = 20; // turbo, stage-0 boost words
+    db->put_record(data::TableId::TurbineKit, std::move(tk));
+    // The car's stock gearbox and tyres.
+    const ByteSpan* car = db->record(data::TableId::Car, "syn_t");
+    Bytes c(car->begin(), car->end());
+    cardb::put64(c, 8 + 8 * 18, db::id_hash("ge_syn_t"));
+    cardb::put64(c, 8 + 8 * 22, db::id_hash("ft_syn_t"));
+    cardb::put64(c, 8 + 8 * 23, db::id_hash("rt_syn_t"));
+    db->put_record(data::TableId::Car, std::move(c));
+    db->rebuild();
+    return db;
+}
+
+} // namespace
+
+TEST(net_car_setup_rules) {
+    // A garage car's parts and settings must be ones GT Mode can give it (docs/dev/ONLINE.md "Cars"): its own parts, the
+    // ranges its parts' Settings pages allow, the words no page sets left as the parts give them.
+    auto dbp = tuning_db();
+    if (!dbp) SKIP("in-memory database did not load");
+    const data::CarDatabase& db = *dbp;
+    const data::Car* car = db.car("syn_t");
+    CHECK(car != nullptr);
+    if (!car) return;
+    const int su = game::part_slot(18), ge = game::part_slot(17), na = game::part_slot(11), tk = game::part_slot(12);
+    const int rt = game::part_slot(29);
+    auto problem = [&](const std::array<u64, 27>& p, const sim::CarSettings& s) { return game::garage_setup_problem(db, "syn_t", p, s); };
+    std::array<u64, 27> parts = car->parts;
+    parts[26] = 0; // make_car's wheel slot
+    const sim::CarSettings stock = sim::stock_settings(db, "syn_t", parts);
+    CHECK(problem(parts, stock).empty());
+
+    // Parts: the car's own (the shop's record for each goods), never another car's.
+    const std::vector<u64> sus = game::fittable_parts(db, "syn_t", su);
+    CHECK(sus.size() == 2 && sus[0] == car->parts[size_t(su)] && sus[1] == db::id_hash("su_syn_t_racing"));
+    std::array<u64, 27> p = parts;
+    p[size_t(su)] = db::id_hash("su_syn_o_racing");
+    CHECK(problem(p, sim::stock_settings(db, "syn_t", p)) == "a part GT Mode does not fit on this car (suspension)");
+    p[size_t(su)] = 0;
+    CHECK(problem(p, stock) == "a part GT Mode does not fit on this car (suspension)");
+    // An NA tune or a turbo kit, not both (fitting one restores the other's stock part).
+    p = parts;
+    p[size_t(na)] = db::id_hash("nt_syn_t_1");
+    CHECK(problem(p, sim::stock_settings(db, "syn_t", p)).empty());
+    p[size_t(tk)] = db::id_hash("tk_syn_t_1");
+    CHECK(problem(p, sim::stock_settings(db, "syn_t", p)) == "an NA tune and a turbo kit together");
+    p[size_t(na)] = parts[size_t(na)];
+    sim::CarSettings s = sim::stock_settings(db, "syn_t", p);
+    CHECK(s.turbo[0] == 12 && problem(p, s).empty());
+    s.turbo[0] = 30; // no page sets the boost
+    CHECK(problem(p, s) == "turbo out of range");
+
+    // Settings: the stock suspension's page is locked (one value per spring): its own values only.
+    s = stock;
+    s.spring[0] += 1;
+    CHECK(problem(parts, s) == "front spring rate out of range");
+    // The racing suspension's sliders: their ranges from its record.
+    p = parts;
+    p[size_t(su)] = db::id_hash("su_syn_t_racing");
+    const sim::CarSettings racing = sim::stock_settings(db, "syn_t", p);
+    CHECK(racing.spring[0] == 60 && problem(p, racing).empty());
+    s = racing;
+    s.spring = {40, 130}, s.ride_height = {100, 140}, s.camber = {0, 30}, s.toe = {120, 136}, s.arb = {1, 7};
+    s.damper = {1, 1, 8, 8, 8, 8, 1, 1};
+    CHECK(problem(p, s).empty());
+    s.spring[0] = 121;
+    CHECK(problem(p, s) == "front spring rate out of range");
+    s.spring[0] = 120, s.damper[6] = 9; // past the steps: the spec builder's interpolation would extrapolate
+    CHECK(problem(p, s) == "rear dampers out of range");
+    s.damper[6] = 8, s.ride_height[1] = 99;
+    CHECK(problem(p, s) == "rear ride height out of range");
+    s.ride_height[1] = 100, s.motion_ratio[0] = 150; // no page sets it
+    CHECK(problem(p, s) == "front motion ratio out of range");
+
+    // A stored-ratio gearbox keeps its ratios and final.
+    s = stock;
+    s.gears[2] -= 10;
+    CHECK(problem(parts, s) == "gear 2 out of range");
+    s = stock;
+    s.final_drive = 3900;
+    CHECK(problem(parts, s) == "final gear out of range");
+    // The adjustable gearbox: the final slider's range (its top end exclusive) and the auto level's.
+    p = parts;
+    p[size_t(ge)] = db::id_hash("ge_syn_t_full");
+    const sim::CarSettings full = sim::stock_settings(db, "syn_t", p);
+    CHECK(full.final_drive == 4111 && full.gear_slider == 25 && full.gears[1] > 0 && problem(p, full).empty());
+    s = full;
+    for (int f : {2500, 5499}) {
+        s.final_drive = f;
+        CHECK(problem(p, s).empty());
+    }
+    s.final_drive = 5500;
+    CHECK(problem(p, s) == "final gear out of range");
+    s.final_drive = 4111, s.gear_slider = 43;
+    CHECK(problem(p, s) == "gear auto setting out of range");
+    // As the pages leave it: the auto level moved at the shortest final (gears 1-6 regenerate there; the reverse stays),
+    // first gear raised to its slider's end (9/8 of the reference), then the final moved to its other end.
+    s = full;
+    s.final_drive = 2500, s.gear_slider = 18;
+    CHECK(sim::apply_gear_slider(db, p, s));
+    s.gears[0] = full.gears[0];
+    s.gears[1] = s.gears[1] * 9 / 8;
+    s.final_drive = 5499;
+    CHECK(problem(p, s).empty());
+    const int first = s.gears[1];
+    s.gears[1] = 2 * first; // past the top of the bounds (the most revs, the largest tyre, the shortest final)
+    CHECK(problem(p, s) == "gear 1 out of range");
+    s.gears[1] = first, s.gears[6] = 100;
+    CHECK(problem(p, s) == "gear 6 out of range");
+    // Parts fitted after the gearbox leave its ratios (generated with the old tyres and rev limit): still legal.
+    std::array<u64, 27> later = p;
+    later[size_t(rt)] = db::id_hash("rt_syn_t_m");
+    later[size_t(na)] = db::id_hash("nt_syn_t_1");
+    sim::CarSettings kept = full; // (refresh_settings resets only the fitted part's group)
+    CHECK(sim::stock_settings(db, "syn_t", later).gears[1] != full.gears[1]);
+    CHECK(problem(later, kept).empty());
+    kept.gears[0] = 9000;
+    CHECK(problem(later, kept) == "reverse gear out of range");
+
+    // On receipt: the lobby refuses it, with the reason; the owner's own lobby says so too.
+    game::GarageCar g;
+    g.car = "syn_t";
+    g.parts = p;
+    g.settings = full;
+    game::OnlineCar ok = wire(game::online_car_from_garage(db, g));
+    const auto all = models({"zz0001"});
+    std::string why = "x";
+    CHECK(game::online_car_here(db, nullptr, ok, all, &why) == CarHere::Ok && why == "x");
+    g.settings.final_drive = 6000;
+    game::OnlineCar bad = wire(game::online_car_from_garage(db, g));
+    CHECK(game::online_car_here(db, nullptr, bad, all, &why) == CarHere::Illegal && why == "final gear out of range");
+    CHECK(game::car_here_blocks(CarHere::Illegal) && std::string(game::car_here_text(CarHere::Illegal)) == "is not a legal setup");
+    const game::CarFacts f = game::online_car_facts(db, nullptr, bad);
+    CHECK(f.setup == "final gear out of range" && game::online_car_facts(db, nullptr, ok).setup.empty());
+    game::CarRules any;
+    CHECK(!game::car_meets_rules(bad, f, any, &why) && why == "not a legal setup: final gear out of range");
+}
+
+namespace {
+
+// INVENTED mod cars over donor car syn_d.
+const char* kSynMod = "[car]\nlabel = syn_mod\nname = Syn Mod\ndonor = syn_d\n[body]\nweight_kg = 1000\n";
+const char* kSynModHeavier = "[car]\nlabel = syn_mod\nname = Syn Mod\ndonor = syn_d\n[body]\nweight_kg = 1100\n";
+
+bool add_mod(data::CarDatabase& db, const char* def) {
+    std::string err;
+    std::optional<data::ModCarDef> d = data::parse_mod_car(def, &err);
+    if (!d || !data::add_mod_car(db, *d, &err)) {
+        std::printf("  mod car: %s\n", err.c_str());
+        return false;
+    }
+    db.rebuild();
+    return true;
+}
+
+// Car syn_d (cardb::add_car, model zz0001) with the drivetrain and gearbox records a mod car's donor needs; with `mod`,
+// that mod car installed over it, as a player who has the mod.
+std::unique_ptr<data::CarDatabase> donor_db(const char* mod = nullptr) {
+    auto db = cardb::empty_database();
+    if (!db) return db;
+    cardb::add_car(*db, "syn_d", 300, 75, "zz0001");
+    db->put_record(data::TableId::Drivetrain, part_record(*db, "dt_syn_d", "syn_d", 0, 0x40));
+    Bytes ge = part_record(*db, "ge_syn_d", "syn_d", 0, 0x30); // stored ratios, final 4.000
+    ge[0x11] = 5;
+    cardb::put16(ge, 0x12, 3300);
+    const u16 ratios[5] = {3200, 2000, 1400, 1050, 820};
+    for (size_t i = 0; i < 5; ++i) cardb::put16(ge, 0x14 + 2 * i, ratios[i]);
+    cardb::put16(ge, 0x22, 4000), cardb::put16(ge, 0x24, 4000), cardb::put16(ge, 0x26, 4000);
+    db->put_record(data::TableId::Gear, std::move(ge));
+    const ByteSpan* car = db->record(data::TableId::Car, "syn_d");
+    if (!car) return nullptr;
+    Bytes c(car->begin(), car->end());
+    cardb::put64(c, 8 + 8 * 13, db::id_hash("dt_syn_d"));
+    cardb::put64(c, 8 + 8 * 18, db::id_hash("ge_syn_d"));
+    db->put_record(data::TableId::Car, std::move(c));
+    db->rebuild();
+    if (mod && !add_mod(*db, mod)) return nullptr;
+    return db;
+}
+
+} // namespace
+
+TEST(net_car_garage_mod_car) {
+    // A mod car bought in GT Mode races from the garage as a garage car that carries its package and donor
+    // (docs/dev/ONLINE.md "Mod cars"): a player who lacks the mod is offered it when the donor is on their disc, not
+    // refused; once it is installed the car is checked as a garage car, its digest and then its setup.
+    auto owner = donor_db(kSynMod), lacks = donor_db();
+    if (!owner || !lacks) SKIP("in-memory database did not load");
+    const data::Car* car = owner->car("syn_mod");
+    CHECK(car && owner->mod_car("syn_mod") && !lacks->car("syn_mod"));
+    if (!car) return;
+    game::GarageCar g;
+    g.car = "syn_mod";
+    g.parts = car->parts;
+    g.settings = sim::stock_settings(*owner, g.car, g.parts);
+    game::OnlineCar own = game::online_car_from_garage(*owner, g);
+    CHECK(own.kind == game::OnlineCar::Kind::Garage && !game::online_car_is_mod(own));
+    game::OnlineCar oc = own;
+    oc.package = std::string(64, 'e'); // as the lobby fills it in: its package's SHA-256 and size
+    oc.package_size = 4321;
+    const game::OnlineCar sent = announced(*owner, oc);
+    CHECK(sent.kind == game::OnlineCar::Kind::Garage && sent.digest && sent.parts == g.parts);
+    CHECK(sent.package == oc.package && sent.package_size == 4321 && game::online_car_is_mod(sent) && sent.donor == "syn_d");
+    const auto all = models({"zz0001"});
+    CHECK(here_on(*owner, sent, all) == CarHere::Ok && !game::mod_download_offered(*owner, sent));
+
+    // Not installed: offered for download (its donor is on this disc), else a stand-in.
+    CHECK(here_on(*lacks, sent, all) == CarHere::ModMissing && game::mod_download_offered(*lacks, sent));
+    // An older game's descriptor has no package: not on this disc, as before, and nothing is offered.
+    game::OnlineCar old = sent;
+    old.package.clear(), old.package_size = 0;
+    old = wire(old);
+    CHECK(here_on(*lacks, old, all) == CarHere::Unknown && !game::mod_download_offered(*lacks, old));
+
+    // The donor decides the offer, for a garage mod car and a mod car from the list alike. A disc without the donor (the
+    // mod is built over another game's disc car): not on this disc, nothing offered. A donor not known (an older game's
+    // descriptor): a stand-in, nothing offered.
+    game::OnlineCar list = game::online_car_from_db(*owner, "syn_mod", 0);
+    CHECK(list.kind == game::OnlineCar::Kind::Mod && list.donor == "syn_d");
+    list.package = oc.package, list.package_size = 4321;
+    list = announced(*owner, list);
+    CHECK(list.donor == "syn_d");
+    auto elsewhere = cardb::empty_database();
+    if (!elsewhere) SKIP("in-memory database did not load");
+    cardb::add_car(*elsewhere, "syn_e", 300, 75, "zz0001");
+    elsewhere->rebuild();
+    for (const game::OnlineCar& c : {sent, list}) {
+        CHECK(here_on(*lacks, c, all) == CarHere::ModMissing && game::mod_download_offered(*lacks, c));
+        CHECK(here_on(*elsewhere, c, all) == CarHere::Unknown && !game::mod_download_offered(*elsewhere, c));
+        game::OnlineCar unknown = c;
+        unknown.donor.clear();
+        unknown = wire(unknown);
+        CHECK(unknown.package == c.package && unknown.donor.empty());
+        CHECK(here_on(*lacks, unknown, all) == CarHere::ModMissing && !game::mod_download_offered(*lacks, unknown));
+        CHECK(here_on(*elsewhere, unknown, all) == CarHere::ModMissing && !game::mod_download_offered(*elsewhere, unknown));
+        // A donor that is a mod car here is no donor (mod cars are built over disc cars).
+        game::OnlineCar over_mod = c;
+        over_mod.car = "syn_other", over_mod.donor = "syn_mod";
+        CHECK(here_on(*owner, wire(over_mod), all) == CarHere::Unknown && !game::mod_download_offered(*owner, wire(over_mod)));
+    }
+
+    // Lobby rules: the checks that need the car pass on a machine without it; "no mod cars" refuses it there, and on its
+    // owner's machine before the package is filled in.
+    game::CarRules r;
+    std::string why;
+    r.max_ps = 1, r.drive = 3;
+    CHECK(game::car_meets_rules(sent, game::online_car_facts(*lacks, nullptr, sent), r, &why));
+    r = {};
+    r.allow_mods = false;
+    CHECK(!game::car_meets_rules(sent, game::online_car_facts(*lacks, nullptr, sent), r, &why) && why == "mod cars are not allowed");
+    CHECK(!game::car_meets_rules(own, game::online_car_facts(*owner, nullptr, own), r, &why) && why == "mod cars are not allowed");
+    CHECK(game::online_car_facts(*owner, nullptr, own).mod && !game::online_car_facts(*lacks, nullptr, old).mod);
+
+    // Installed (the download): checked as a garage car, and offered no more.
+    CHECK(add_mod(*lacks, kSynMod));
+    CHECK(here_on(*lacks, sent, all) == CarHere::Ok && !game::mod_download_offered(*lacks, sent));
+    CHECK(here_on(*lacks, old, all) == CarHere::Ok);
+    CHECK(game::online_car_facts(*lacks, nullptr, old).mod); // (a mod car in this database)
+    // Another version of the mod under its label builds another car: different.
+    auto heavier = donor_db(kSynModHeavier);
+    CHECK(heavier && here_on(*heavier, sent, all) == CarHere::Differs);
+    // A setup GT Mode cannot give it (a setting off its parts' ranges), announced with its own digest: not legal.
+    game::OnlineCar soft = oc;
+    soft.settings.spring[0] += 10;
+    soft = announced(*owner, soft);
+    why.clear();
+    CHECK(soft.digest && soft.digest != sent.digest);
+    CHECK(game::online_car_here(*lacks, &program(), soft, all, &why) == CarHere::Illegal && why == "front spring rate out of range");
+    // The race draws its body: the donor's model here.
+    CHECK(here_on(*lacks, sent, models({"zz0002"})) == CarHere::NoModel);
 }
 
 namespace {
@@ -385,4 +801,92 @@ TEST(net_car_here_disc) {
     CHECK(!game::car_here_blocks(h));
     std::printf("  arcade Viper (%s here) named as %s: %s\n", viper.car.c_str(), twin.c_str(),
                 h == CarHere::Ok ? "races" : game::car_here_text(h));
+}
+
+TEST(net_car_setup_disc) {
+    // Every garage car GT Mode can build on a disc is a legal setup: each stock car, each with each upgrade the tune shop
+    // fits (GtMode's fitting, settings as it leaves them), and each with the adjustable gearbox, its Settings sliders set
+    // to their top ends, then every other upgrade fitted (parts fitted after a gearbox leave its ratios), then every slider
+    // to its bottom end.
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    Vfs vfs(&disc->volume());
+    auto data = std::make_shared<game::GtData>();
+    CHECK(data->load([&](const std::string& path) { return vfs.read(path); }));
+    game::GtMode gt(data);
+    const data::CarDatabase& db = gt.db();
+    std::vector<std::string> sliders = {
+        "slider_gear_auto_level", "slider_gear_ratio_1", "slider_gear_ratio_2", "slider_gear_ratio_3", "slider_gear_ratio_4",
+        "slider_gear_ratio_5", "slider_gear_ratio_6", "slider_gear_ratio_7", "slider_gear_ratio_final", "slider_rate_f",
+        "slider_rate_r", "slider_height_f", "slider_height_r", "slider_damper_f", "slider_damper_r", "slider_bound_f",
+        "slider_bound_r", "slider_rebound_f", "slider_rebound_r", "slider_camber_f", "slider_camber_r", "slider_toe_f",
+        "slider_toe_r", "slider_stabilizer_f", "slider_stabilizer_r", "slider_brake_f", "slider_brake_r",
+        "slider_lsd_init_f", "slider_lsd_init_r", "slider_lsd_accl_f", "slider_lsd_accl_r", "slider_lsd_decl_f",
+        "slider_lsd_decl_r", "slider_elec_aycc", "slider_aero_f", "slider_aero_r", "slider_elec_ascc", "slider_elec_tcsc",
+        "slider_elec_vcdc"};
+    // Each slider the car's pages open, to one end, committed one by one (the gear ratios' ranges follow the auto level).
+    auto to_ends = [&](game::GarageCar& c, bool top) {
+        for (const std::string& item : sliders) {
+            if (!game::slider_enabled(gt, c, item)) continue;
+            const std::optional<game::SliderRange> r = game::slider_range(gt, c, c, item);
+            if (!r || r->fixed()) continue;
+            game::GarageCar work = c;
+            if (game::slider_set(gt, c, work, item, top ? r->hi() : r->lo(), "")) c = work;
+        }
+    };
+    int cars = 0, builds = 0, bad = 0, probes = 0, refusals = 0;
+    u64 other_su = 0;
+    auto check = [&](const game::GarageCar& c, const std::string& what) {
+        ++builds;
+        const std::string why = game::garage_setup_problem(db, c.car, c.parts, c.settings);
+        if (!why.empty() && ++bad <= 20) std::printf("  %s: %s\n", what.c_str(), why.c_str());
+    };
+    constexpr int kVariableGearbox = 22; // goods: the adjustable transmission
+    for (const data::Car& car : db.cars()) {
+        if (db.mod_car(car.label)) continue;
+        const std::optional<game::GarageCar> stock = gt.make_car(car.label);
+        if (!stock) continue;
+        ++cars;
+        check(*stock, car.label);
+        std::vector<const game::ShopItem*> upgrades;
+        for (const game::ShopItem& item : game::shop_items())
+            if (item.flow != game::ShopItem::Flow::BuyOnly && game::find_part(db, car.label, item.goods)) upgrades.push_back(&item);
+        for (const game::ShopItem* item : upgrades) {
+            game::GarageCar c = *stock;
+            if (gt.fit_goods(c, item->goods)) check(c, car.label + " + " + item->item);
+        }
+        game::GarageCar c = *stock;
+        gt.fit_goods(c, kVariableGearbox);
+        to_ends(c, true);
+        check(c, car.label + " top ends");
+        for (const game::ShopItem* item : upgrades)
+            if (item->goods != kVariableGearbox) gt.fit_goods(c, item->goods);
+        check(c, car.label + " tuned after the gearbox");
+        to_ends(c, false);
+        check(c, car.label + " tuned, bottom ends");
+        // And what no page or shop gives it: refused.
+        auto refused = [&](game::GarageCar x, const std::string& expect) {
+            ++probes;
+            const std::string why = game::garage_setup_problem(db, x.car, x.parts, x.settings);
+            if (why == expect) ++refusals;
+            else std::printf("  %s: \"%s\", not \"%s\"\n", car.label.c_str(), why.c_str(), expect.c_str());
+        };
+        game::GarageCar x = c;
+        x.settings.spring[0] = 1000;
+        refused(x, "front spring rate out of range");
+        x = c;
+        x.settings.gears[1] = 30000;
+        refused(x, "gear 1 out of range");
+        x = c;
+        const size_t su = size_t(game::part_slot(18));
+        const std::vector<u64> own = game::fittable_parts(db, car.label, int(su));
+        if (other_su && std::find(own.begin(), own.end(), other_su) == own.end()) {
+            x.parts[su] = other_su;
+            refused(x, "a part GT Mode does not fit on this car (suspension)");
+        }
+        other_su = c.parts[su]; // this car's racing suspension, for the next car
+    }
+    std::printf("  %s: %d cars, %d garage cars checked, %d not legal; %d of %d tampered cars refused\n",
+                region_name(disc->info().region), cars, builds, bad, refusals, probes);
+    CHECK(cars > 0 && bad == 0 && refusals == probes);
 }

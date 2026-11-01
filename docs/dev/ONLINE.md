@@ -13,7 +13,10 @@ online lobby (`src/app/screen_online.cpp`; also `gt3r --screen online`).
   sends that car's state after every step.
 - An online race is a `race::ExactField` with the i.LINK battle's race rules
   (`Conductor::BattleMP`): start type 1 (four seconds on the grid), the lobby's laps, no
-  tyre wear, no catch-up. Every machine runs **NTSC-U rules at 60 steps a second**,
+  tyre wear, no catch-up. Each player's car takes their own ASM / TCS: the game's Options
+  (`[options] assist_asm` / `assist_tcs`), which the start page and the lobby set too
+  (`OnlineLaunch::asm_on` / `tcs_on`); the race entry's flags in every state tell the other
+  machines, whose prediction for that car is built for them. Every machine runs **NTSC-U rules at 60 steps a second**,
   whatever disc it has (`ExactFieldOptions::rules`, set by `RaceScreen::exact_options` for
   online races; offline races follow their disc's release), so everyone in a race shares
   one physics.
@@ -58,8 +61,8 @@ same pad frames compute the same race. That would allow, later:
   prediction, contacts exactly alike everywhere, a few bytes per step; it costs input
   delay of about half the slowest round trip and a stall when frames are late.
 - **Rollback:** run on with predicted frames and re-run from a copy of the race
-  (`ExactRace` is copyable) when a real frame differs: no input delay, at about 12 µs per
-  car and step re-run (M-series).
+  (`ExactRace` is copyable) when a real frame differs: no input delay, at about 20 µs per
+  car and step re-run (M-series; the EE's divider, run digit by digit, is about half of it).
 - What it needs: the same rules and program tables on every machine (NTSC-U rules, as
   now), the same race setup (each car's parameter block from each disc's database: the
   lobby already compares its digest exactly, "Regional discs" below), and the same
@@ -155,8 +158,13 @@ Each player's car travels as a `game::OnlineCar` descriptor (`src/game/net_car.*
   equipment (`race::exact_online_source`), the spec the lobby's rules read
   (`game::online_car_spec`, the same path as GT Mode's `car_spec`). The lobby lists the GT Mode garage first. A
   garage car keeps its own paint. Remote cars use their real spec, since
-  weight and size count in contact.
-- **Mod car:** its label plus the SHA-256 and size of its package (below).
+  weight and size count in contact. Its parts and settings must be ones GT Mode
+  can give the car ("Legal setups" below). A mod car bought in GT Mode is a
+  garage car that also carries its package's SHA-256 and size and its donor,
+  so a player without the mod is offered it as for a mod car from the list
+  ("Mod cars").
+- **Mod car:** its label plus the SHA-256 and size of its package and its
+  donor car (below).
 - **Arcade car:** a car of the arcade's class lists (database table 35, e.g.
   `nsx_s_zero_97_290`), with its base car. Every machine builds it as the arcade
   races it (`race::arcade_car`): the variant's parts with its arcade tyres for the
@@ -183,21 +191,33 @@ players' cars from its own disc, so a car races only where it is the same car.
   race equals it (`net_exact_lobby_digest_is_the_race_params`).
 - **The check** (`game::online_car_here`, tested in `net_car_here_regions`,
   `net_car_here_disc`). For every other player's car each machine reports one of:
-  - **not on this disc**: the car, a part or its arcade car is not in this database;
+  - **not on this disc**: the car, a part, its arcade car or a mod car's donor is not in this
+    database;
   - **different on this disc**: this machine's digest differs: this disc's data for the car
     differs where it reaches P (another engine curve, body size, gear set, tyre, suspension);
   - **no model on this disc**: no `cars/day/<model>` for the body the race would draw;
+  - **not a legal setup**: a garage car with a part or a setting GT Mode cannot give it,
+    with the reason ("Bob's car is not a legal setup: front spring rate out of range";
+    "Legal setups" below). It is checked after the digest, so another region's car that
+    builds differently reads as different;
   - fine.
-  A mod car not installed here is not refused (download, else a stand-in). Once installed it
-  is checked like the others: its package fixes the definition, but it is built over its
-  donor from this disc's database.
+  A mod car not installed here whose donor is here is not refused (download, else a
+  stand-in), from the list or from a garage (`game::online_car_is_mod`). Once installed it
+  is checked like the others:
+  its package fixes the definition, but it is built over its donor from this disc's
+  database. A garage mod car is then checked as a garage car: the digest, then its setup
+  (`net_car_garage_mod_car`).
 - **Arcade cars** are found by their arcade label. Their base car may have another label on
   another disc (`viper_gtsr_oreca_00_597`: `dodge_viper_gtsr_oreca_00` on NTSC-U,
   `viper_gtsr_oreca_00` on PAL and NTSC-J). A descriptor with a digest builds on this disc's
   base car, and races when the digests match, drawn as this disc's base car
   (`game::online_car_base`); one without a digest is refused.
 - **Wire.** The digest trails the descriptor (32 bytes). Older games stop reading before it;
-  an older game's descriptor has none and is not compared.
+  an older game's descriptor has none and is not compared. After the digest, and only
+  with one (without it, these bytes would read as the digest): a mod car's donor, and a
+  garage mod car's package (its hash and size, as a mod car's) and donor. 0.5.0 ignores
+  what follows the digest and reads the same car. A descriptor that ends at the digest
+  (an older game's) has no garage package and no donor (`net_car_digest_wire`).
 
 What the discs build differently (`net_car_params_regions` with `GT3R_COMPARE_DISC`: every
 car, every arcade car, and every car with each of its upgrade parts alone, 9,962 builds):
@@ -222,6 +242,44 @@ Cars that race in a mixed lobby:
 | NTSC-U + PAL | 227 of 244 | 72 of 72 |
 | NTSC-U + NTSC-J | 237 of 242 | 70 of 72 |
 | all three | 220 of 242 | 70 of 72 |
+
+### Legal setups
+
+A garage car's descriptor names its parts and settings, and every machine builds the car
+from them, the prediction shadow included. A part or setting value that GT Mode can
+never give the car would race as sent. So each machine checks a received garage car
+against its own disc's GT Mode rules (`game::garage_setup_problem` in
+`src/game/gt_setting.cpp`; `online_car_here` refuses the car, and `online_car_facts` /
+`car_meets_rules` refuse the player's own car the same way):
+- **Parts.** Each of the 27 slots holds the car's stock part or the record GT Mode
+  fits for a goods the car can own (`game::fittable_parts`): the tune shop's goods for the
+  car (`find_part`: the table's first record with +0x08 = the car and +0x10 = the stage),
+  bought and fitted, a tire set's rear goods with its front ones, and the stock parts'
+  own goods, which the change-parts pages fit back. Dirt tires are never fitted (the race
+  puts them on); the wheel slot is 0 or stock. An NA tune and a turbo kit are never both
+  off stock: fitting one restores the other's stock part.
+- **Settings.** Each word is either its parts' stock value (`sim::stock_settings`) or a
+  value one of the Settings page sliders that sets it can give. That slider's page must
+  open (the locks), it must have two values or more, and the value must lie in its range
+  from the fitted part records (`slider_range`, GT Mode §14). No page sets the motion
+  ratios, the turbo words or the ASM gains past the first, so those must stay stock.
+- **Gears.** A gearbox with stored ratios keeps them. A computed box's ratios come from
+  the generator (physics §6.7) with the parts fitted when the box was fitted or its auto
+  level last moved. Parts fitted later leave the ratios as they are. The gear sliders keep
+  each ratio within the ranges around a reference final drive. Neither the reference final
+  nor those parts travel with the car. So each gear's bounds are the generator's over every
+  rev adder (engine balancing, an NA tune or a turbo kit), drivetrain and driven tire the
+  car can have, and every final the final slider allows. The generator grows with revs and
+  tire size and falls with the final, so the ends of each range are enough. The reverse
+  uses the stock auto level and final.
+- **Engine condition** needs no check: any value gives an output factor (97 % to 100 %
+  for wear and running in, times 100 % to 105 % for fresh oil) that a GT Mode car reaches.
+- **Tested.** `net_car_setup_rules` covers an invented car (no disc). `net_car_setup_disc`
+  covers every disc car on NTSC-U, PAL and NTSC-J: stock, with each tune-shop upgrade
+  alone, and with the adjustable gearbox and its sliders at their top ends, then every
+  other upgrade, then every slider at its bottom end (8,765 garage cars on NTSC-U). All
+  of them are legal. Each car with a spring, a gear ratio or another car's suspension
+  past them is refused (724 of 724).
 
 ## Pickers (`src/app/online_pickers.cpp`)
 
@@ -307,9 +365,26 @@ lobby builds and validates its own package when the car is chosen (a car
 that would not pass is shown to the others as a stand-in, with a note to its
 owner).
 
+**What is offered.** Only a mod car (`cars/<label>.ini`) has a package. A disc
+car never travels as one, whatever disc it comes from: a garage car from a disc
+this machine does not have is "not on this disc", with nothing to download. A
+package holds only the mod's own files, and the mod is built over its donor
+car from the receiver's disc, so the descriptor names the donor
+(`data::ModCar::donor`) and the lobby offers the download only when the donor
+is a disc car here (`game::mod_download_offered`, tested in
+`net_car_garage_mod_car`):
+- donor here: the download is offered;
+- donor not here: the car is "not on this disc", and nothing is offered;
+- donor not known (an older game's descriptor): nothing is offered, and the
+  car races as a stand-in.
+
 **Download.** When the lobby allows mod cars and another player races one this
-machine lacks, the lobby asks once per package: "Download it? It is checked,
-then added to your mods" (Cross / Circle; Circle = a stand-in car).
+machine lacks, over a donor it has, the lobby asks once per package: "Download it? It is checked,
+then added to your mods" (Cross / Circle; Circle = a stand-in car). This holds
+for a mod car from the car list and for one from the player's GT Mode garage,
+whose garage descriptor carries the package ("Cars" above). An older game
+sends a garage mod car without its package: a player without the mod sees
+"is not on this disc".
 - The request goes to the host, which serves the package if it has it, or
   fetches it from the owner, verifies it, and keeps a copy for the next player.
 - Chunks are 1 KB on the reliable channel, at most 24 in flight per
@@ -442,7 +517,8 @@ the rules page, where the host changes them and the others read them. The page c
 how many of the player's cars are allowed and says why the chosen one is not.
 Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested in
 `net_car_rules_disc`, `net_car_rules_arcade_classes`):
-- **Mod cars:** allowed (default) or not.
+- **Mod cars:** allowed (default) or not. A mod car from a GT Mode garage is one too:
+  by its package, or, where the car is installed, by this database.
 - **Tuned cars:** allowed, or stock cars only. A garage car counts as tuned when a part
   or a setting differs from the stock car's, as GT Mode's own test (`GtMode::tuned`);
   an untuned garage car races in a stock lobby.
@@ -462,7 +538,8 @@ Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested
   available on dirt courses"). Every other car races anywhere (on dirt as a rally car).
 - **Who checks:** each player's lobby refuses Ready for a car that breaks
   them. The host checks every car it can rebuild before the start. A mod car the
-  host lacks cannot be checked there; only the mod cars rule applies to it.
+  host lacks cannot be checked there; only the mod cars rule applies to it. A garage
+  car that is not a legal setup ("Legal setups" above) breaks every lobby's rules.
 - **Other players' cars** ("Regional discs" above): a player whose machine cannot race
   another player's car cannot be ready ("Bob's car has no model on this disc"), and drops
   Ready when such a car appears. The host refuses the start for its own view the same way.
@@ -471,6 +548,11 @@ Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested
   after the power limit (an older host's message without them reads as "any").
 
 ### Cheat warnings
+The warnings cannot see a car whose descriptor makes it faster: the prediction shadow is
+built from the same descriptor, so it agrees with the owner's machine. That case is
+stopped in the lobby instead: a garage car's parts and settings must be ones GT Mode can
+give it ("Legal setups" above), and the other cars are built from each machine's own disc.
+
 Every machine runs `race::Plausibility` on every remote car:
 - **Speed:** above its geared top speed × 1.15 + 4 m/s for 0.5 s.
 - **Teleport:** a jump its motion does not explain (more than 6 m).

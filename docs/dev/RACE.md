@@ -68,10 +68,10 @@ them, then the state.
 | `screen_race_setup.cpp` | Loading and (re)starting a run: `start`, `build_vehicle` (the run's `RaceField` on the exact core; a race that cannot be set up becomes the error page), `restart` / `reset_run_state`, warp, TV cameras, LOAD GHOST |
 | `screen_race_drive.cpp` | The race loop: `update_drive` (one frame) and `tick` (one race step), the race's AI taking the player's car (autopilot) and scripted inputs, finish detection, gear hint, dirt, pylons, tyre smoke, force feedback |
 | `screen_race_render.cpp` | `render_drive`: 3D views (1P, 2P split, 4:3 frame), draw items, reflections, mirrors, sun / lamps, `hud_data`, the results / licence / time-trial overlays |
-| `screen_race_audio.cpp` | Music cues, course ambience listeners, extra car sound inputs, `silence` |
+| `screen_race_audio.cpp` | Music cues, the song controls (`song_controls`, `skip_song`), course ambience listeners, extra car sound inputs, `silence` |
 | `screen_race_select.cpp` | The standalone selection page: course / car picker and saved-replay list |
 | `screen_race_quick_menu.cpp` | Pre-race and result quick menus (layout per mode, item actions, disabled items), free run before a GT race, the run's records and Top 3 (`record_run`, `fill_top3`), options / settings / records panels |
-| `screen_race_pause.cpp` | The pause window (GT3's PauseMenu, REPLAY OPTIONS, our longer list) |
+| `screen_race_pause.cpp` | The pause window (GT3's PauseMenu, REPLAY OPTIONS, our longer list), the song under it (`draw_song`, L1 / R1) |
 | `screen_race_results.cpp` | Result rows, the result latched and posted to the menus, `leave`, race display strings |
 | `screen_race_replay.cpp` | Recording / playback glue, replay view modes and REPLAY OPTIONS, the replay pad and the followed car, the camera manager's 60 Hz frames (music cut requests, view mode 1's handler), the dissolve and the post pass's grade |
 | `screen_race_post_run.cpp` | After a run: the exit transition, prize / trophy and name entry, the automatic replay, back to the quick menu, its backdrop (play mode 2), pause EXIT (`run_kind`, `after_run`, `return_to_menu`) |
@@ -284,7 +284,7 @@ wheelspin under throttle (`race_rumble`).
     race's battle start on GT3's line 6).
   - 2P tyre damage: the battle's tire wear for both cars, not on dirt courses.
   - ASM / TCS off: the player's car (and player 2's) gets its ASCC flags / TCS gain cleared, in
-    arcade single race, free run and 2P only; on keeps the car's own systems.
+    arcade single race, free run, 2P and online battles only; on keeps the car's own systems.
   - gear_auto: the default AT/MT outside arcade single race and 2P (they use the car page).
   - race / replay SE off: no engine, tyre or car one-shot sounds (race SE live, replay SE in
     replays, demos and the attract mode); race BGM off: no race music (the quick menus' music
@@ -752,7 +752,8 @@ pads and inputs are ignored; at the last frame it logs whether the race's hash i
 the exact core, the program and the game data it was recorded on and its rules (`RaceScreen::can_play`,
 `build_playback`: refused with the reason otherwise, "This replay cannot be played: recorded with ...",
 never played on another program, data or rules). Saved ghosts follow the same rule (a ghost of
-another program's or rules' run is not offered). **Files of versions before 11 are refused** (`ReplayTooOld`,
+another program's or rules' run is not offered). **Files of versions before 12 are refused** (`ReplayTooOld`; version 11
+ran on the float rounding before the EE's measured multiplier and divider,
 "This replay was recorded with an older version and cannot be played."); the Replay Theater lists them
 with "Recorded with an older version", not playable (they can be deleted). Tests: `race_replay_exact_record` (the record through a file, disc-free),
 `exact_replay_round_trip` (disc: a pad-read GT race with a gearbox change and a seeded condition, a
@@ -1017,13 +1018,15 @@ theater's demonstrations, the licence preview) follow NTSC-U's on every disc
   player, or the split-screen battle), the start type and countdown from the event (+0x1F3 / +0x1F2;
   battles none), the race's laps, and one race entry per car as GT3's race information holds it: car 0
   player 1 (car 1 player 2), then the opponents. A car's equipment (`exact_equipment`): a GT-mode garage
-  car's parts and settings (`GameRequest::car_parts` / `car_settings`; `make_equipment`), a variant
-  (table 31: its base car with the variant's parts, `stock_equipment`), an arcade car (table 35:
-  `arcade_equipment`, the tyres switched to the car page's stage), a database car with its parts; the
-  screen keeps the launch's source (`launch_source_`). A player's entry: pedal style 0
+  car's parts and settings (`GameRequest::car_parts` / `car_settings`; `make_equipment`), an event's
+  car (table 31: the opponents, a licence test's car) or an arcade car (table 35) from its record, parts and
+  settings (`variant_equipment`; an arcade car's tyres switched to the car page's stage), a database car with
+  its parts; then every entry on the course's tyres (`sim::exact::course_tires`: dirt stage 12, wet the front's
+  stage + 13; a replay's and a whole-run ghost's cars as recorded); the screen keeps the launch's source
+  (`launch_source_`). A player's entry: pedal style 0
   (automatic) or 1 (manual; the pause menu's AT / MT changes it on the record while the pad drives), the
   steering-wheel type 1 when the player's controller is a wheel (`DeviceKind::Wheel`), ASM / TCS from the Options (arcade single race,
-  free run, 2P battle), the engine condition words and the car's dirt. Grid: the opponents in their order
+  free run, 2P battle, online battle), the engine condition words and the car's dirt. Grid: the opponents in their order
   (GT mode: by whole kg per whole power, `gt_grid_places`) on the slots before the players' (the players behind them), never more
   cars than the course's grid slots (more are left out, logged): GT3's menus never make such a field (every
   event's cars fit its course; the arcade's dirt races are one against one). The start port itself reads a
@@ -1479,6 +1482,7 @@ GT3R_RACE="course=trialmt,car=r34_gtr_v_99,cam=0,auto=1,warp=20" \
 | `p2=1`, `car2=<label>`, `split=h\|v` | 2P battle, player 2's car, split layout |
 | `laps=N`, `quick=1`, `qm=<item>` | time trial lap count; open the quick menu after the finish; choose an item |
 | `exit_laps=N` | the live run ends as the pause menu's Exit once it has N laps (screenshots of a free run's record and name entry) |
+| `skip_at=<s>`, `pause_at=<s>` | a Next song, the pause window, at that race time (screenshots of the song display) |
 | `demo=1` | start the demonstration (licence: the disc's demo run) |
 | `theater=<event>` | the Replay Theater's Demonstration of an event (AT010001 .. AT100001, L0B0001 ...) |
 | `script=thr:1@0;steer:-0.3@4` | scripted player input (steer / thr / brk set at times in seconds; `rev:1` / `rev:0` the reverse request, as the back input with the automatic's brake driving it: e.g. `brk:0.6@5;rev:1@5`) |
@@ -1663,11 +1667,11 @@ screen, `screen_race_license.cpp` the flow. The rules (presentation §A):
   the race's start-up sets it: the event's +0x1F3, the time trial's start type the moving start 3) and car
   0's frames as the input device's recorder hands them to the pad read (the recording's
   T - 1, then empty frames; the stream read on past its block as the game's reader does). The race
-  judges it and drives its end itself, and every demo plays as it does in the game: 7 of them end on
-  the time the save records (A-1, A-2, A-3, A-7, B-1, B-2, IB-4); several within a few ms (A-6, A-8,
-  B-6, R-1, IA-2); the rest, the arcade time attacks among them, leave the course in the game too
-  (course-outs from 3 to 22 s after the line): the saves were recorded on a build whose race differs
-  from the release's (the Japanese disc's data, same files, gives the same results). The licence
+  judges it and drives its end itself, and every demo ends on the time its save records (the runs were
+  recorded on a PS2): all 58 on the NTSC-U and NTSC-J discs, the arcade time attacks among them; on
+  the PAL disc's data all but the AT02 time trial, which leaves the course. They need the EE's own
+  multiplier and divider (`base/ee_float.h`); with the float rounding before (an exact chopped
+  product, divisions to nearest) 7 did. The licence
   menu's preview box is no movie: GT3 runs the demo live behind the menu and draws the scene into
   (32, 58, 280, 210); we do the same (looping, TV cameras, silent), and "Demonstration" runs it full
   screen. Test `exact_demo_records`.

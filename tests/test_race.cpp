@@ -935,7 +935,7 @@ TEST(race_field_event) {
     FieldConfig cfg;
     cfg.event = "AEAT0001";
     cfg.exact.data = program();
-    cfg.exact.course_file = course;
+    cfg.exact.course_file = std::make_shared<const Bytes>(course);
     cfg.exact.course = "trialmt";
     cfg.exact.laps = 2;
     cfg.exact.player.car = {"r34_gtr_v_99"};
@@ -958,9 +958,9 @@ TEST(race_field_event) {
 }
 
 // GT Mode's grid on the disc (gt_mode §22.1): the Japan Championship's round 5 field with the opponents in their entry order.
-// On NTSC-U it lines up as GT3 lines it up (GT3 on US 1.10, the round's pre-race grid: Supra, Lancer, NSX, 300ZX, 3000GT, then
-// the player; the old kg-per-PS float rule put the Lancer first). On every disc, in both power units, the race field's grid
-// slots are gt_grid_places over exact_grid_figure, the player last.
+// On NTSC-U it lines up as GT3 lines it up: each car with its entry's tune (about 345 HP each), 4, 4, 4, 3 and 3 kg/HP, so
+// Lancer, NSX, 300ZX, 3000GT, Supra, then the player. On every disc, in both power units, the race field's grid slots are
+// gt_grid_places over exact_grid_figure, the player last.
 TEST(race_gt_grid_disc) {
     Disc* disc = test::any_region_disc();
     if (!disc) SKIP("needs GT3R_DISC");
@@ -997,14 +997,14 @@ TEST(race_gt_grid_disc) {
         }
         const std::vector<int> places = gt_grid_places(fig);
         std::printf("  %s:%s\n", hp ? "HP" : "PS", line.c_str());
-        if (ntsc_u && hp) CHECK(places == (std::vector<int>{3, 4, 0, 1, 2}));
+        if (ntsc_u && hp) CHECK(places == (std::vector<int>{2, 3, 4, 0, 1}));
         FieldConfig cfg;
         cfg.event = ev->label;
         cfg.opponents = opps;
         cfg.grid_by_power = true;
         cfg.grid_hp = hp;
         cfg.exact.data = d;
-        cfg.exact.course_file = course;
+        cfg.exact.course_file = std::make_shared<const Bytes>(course);
         cfg.exact.course = ev->course;
         cfg.exact.laps = ev->laps;
         cfg.exact.player.car = {"r34_gtr_v_99"};
@@ -1554,7 +1554,7 @@ TEST(race_two_player_drift_disc) {
     FieldConfig cfg;
     cfg.max_opponents = 0;
     cfg.exact.data = program();
-    cfg.exact.course_file = course;
+    cfg.exact.course_file = std::make_shared<const Bytes>(course);
     cfg.exact.course = "trialmt";
     cfg.exact.kind = sim::exact::Conductor::Battle2P;
     cfg.exact.laps = 2;
@@ -1592,7 +1592,7 @@ TEST(race_replay_driver_kind) {
 }
 
 // The players' reverse requests survive a file round trip (format v10); a file of a version before
-// 11 is refused (ReplayTooOld), not played approximately.
+// 12 is refused (ReplayTooOld), not played approximately.
 TEST(race_replay_reverse) {
     ReplayRecorder rec;
     rec.begin("trialmt", "r34_gtr_v_99", true, 0, {}, 60.0);
@@ -1611,8 +1611,8 @@ TEST(race_replay_reverse) {
     for (size_t i = 0; same && i < 6; ++i) same = (r.reverse[i] != 0) == rev[i] && (r.reverse2[i] != 0) == !rev[i];
     CHECK(same);
 
-    // Versions 1..10: refused with the older-version message; a later version: not a ReplayTooOld.
-    for (u32 v : {1u, 9u, 10u, 12u}) {
+    // Versions 1..11: refused with the older-version message; a later version: not a ReplayTooOld.
+    for (u32 v : {1u, 9u, 10u, 11u, 13u}) {
         Bytes b = recorded.serialize();
         std::memcpy(b.data() + 8, &v, 4);
         bool too_old = false, refused = false;
@@ -1623,7 +1623,7 @@ TEST(race_replay_reverse) {
         } catch (const FormatError&) {
             refused = true;
         }
-        CHECK(refused && too_old == (v < 11));
+        CHECK(refused && too_old == (v < 12));
     }
 }
 

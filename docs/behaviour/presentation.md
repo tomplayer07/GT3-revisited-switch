@@ -869,7 +869,7 @@ from the shift-up rpm (the setup's upshift rpm, else the rev limit - 500).
   is centered at (435, 430) onboard; remote it starts at x 495 (pushed), y 410.
   - The ASM and TCS lamps show the car's own aid states, which the race sets
     every tick. ASM is lit while the car has ASM on (it does not blink). The
-    Options menu's ASM / TCS off (arcade single race, free run, 2P battle) build
+    Options menu's ASM / TCS off (arcade single race, free run, 2P battle, online battle) build
     the player's car for the race without that aid, so its lamp stays out.
   - TCS is lit while the car has TCS on, and blinks while it cuts the throttle.
     The blink counter adds 21 per frame and the lamp is lit while the counter is
@@ -2039,7 +2039,8 @@ cut request. Tests `race_cut_clock`, `race_music_markers`.
   before the signal) the countdown is held at 120. Then in mode 1 a track-4
   marker gives request 4 (cuts on) or a track-3 marker request 3 (off); in
   modes 0, 2 and 3 a track-3 marker gives request 3 and a track-2 marker
-  request 2.
+  request 2. (Ours: the player's own songs come with fallback markers at the
+  disc songs' pace, music §8, so they cut on markers too, not on the countdown.)
 - **Set-up.** A replay's or demonstration's start sets request 1 and x = 4 s and
   the countdown to 60; every REPLAY OPTIONS apply restarts the countdown at 60.
   Without a marked song the first cut therefore comes at once, the next 61

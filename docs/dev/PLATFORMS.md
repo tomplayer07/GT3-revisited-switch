@@ -12,9 +12,9 @@ run interactively; "unverified" means neither.
 | macOS arm64 | Homebrew GCC 16 (libstdc++) | ✅ built, tests pass | `-Wall -Wextra` clean, `gt3r_tests` 0 failures |
 | Linux x86_64/arm64 (Ubuntu 24.04) | GCC 13 | ✅ built, tests pass | Docker `ubuntu:24.04` with the CI apt list; SDL 3.4.12 fetched; warning-free; ctest passes |
 | Linux (Ubuntu 24.04) | clang 18 | ✅ built, tests pass | Same container, `CC=clang CXX=clang++` |
-| Linux desktop session | | ⚠️ unverified | Not run on a real X11/Wayland desktop (no display in the container) |
+| Linux desktop session | GCC 11 (Ubuntu 22.04 container) | ✅ verified | Linux Mint 22.3 (X11), Intel HD 520 (Mesa 25.2): races on Vulkan and on the OpenGL ES renderer (OpenGL ES 3.2), which also takes over when SDL_GPU fails |
 | Windows x64 | MinGW-w64 GCC 13 (cross) | ✅ built | All executables link; see below for the wine test run |
-| Windows x64 | MSVC 2022 | ✅ verified | CI (windows-2022) and a real PC (Windows 11): all tests pass with the disc, 3D (Vulkan, RTX 3080) and online races verified |
+| Windows x64 | MSVC 2022 | ✅ verified | CI (windows-2022) and a real PC (Windows 11): all tests pass with the disc, 3D (Vulkan, RTX 3080) and online races verified; the OpenGL ES renderer races on the same PC through ANGLE (Direct3D 11) and NVIDIA's own OpenGL ES 3.2 |
 | Android arm64 (API 36 emulator) | NDK 27 clang | ✅ verified | Boot → opening movie → title → Arcade → Time Trial → driving with Vulkan; touch controls, tilt, back, home/resume, rotation, file picker |
 | Android x86_64 | NDK 27 clang | ✅ built | Part of the same APK; not run |
 | Android real device | NDK 27 clang | ✅ verified | Galaxy A15 5G (Mali-G57 MC2, Android 16, 4 GB), the low-end baseline: menus, car select (~75 fps), Arcade races (35–55 fps). Races also on a Moto G Power 2024 (Imagination BXM), a Hiby R4 and a Galaxy S26 |
@@ -65,10 +65,14 @@ From macOS, the same build runs in Docker (`colima start`, then
 ### Windows
 
 Visual Studio 2022: `cmake -S . -B build` then build `gt3r` (or open the
-folder in VS). SDL3 and zlib are fetched. The renderer uses Vulkan on
-Windows (we ship SPIR-V and MSL only, no DXIL yet; see RENDERING.md), so a
-GPU driver with Vulkan support is needed for 3D. Without it the game runs
-2D-only.
+folder in VS). SDL3 and zlib are fetched; the fetched SDL gets the fixes in
+`cmake/patches` (on AMD GPUs the Vulkan swapchain keeps fullscreen out of the
+driver's own exclusive mode, in which the window froze). The renderer uses Vulkan on
+Windows (we ship SPIR-V and MSL only, no DXIL yet; see RENDERING.md), and on
+GPUs without Vulkan OpenGL ES 3.0: ANGLE's (Direct3D 11) when
+`-DGT3R_ANGLE_DIR=<folder>` puts its DLLs next to the game, as release
+packages do, otherwise the driver's ([OpenGL ES](RENDERING.md#opengl-es)).
+Without either the game runs 2D-only.
 
 MinGW cross build (Windows executables from macOS or Linux; `brew install mingw-w64` on
 macOS), with the toolchain file in `cmake/mingw-w64.cmake`:
@@ -137,6 +141,19 @@ the system Files app and file pickers as GT3 Revisited, so players can copy mods
 and screenshots out; the Mods screen's **Open folder** opens it there
 (`GT3Activity.openUserFolder`). `GT3R_MOD_ZIP=<archive>` makes the Mods screen install
 that archive as if picked, for testing without the file picker.
+
+A music folder outside it (Settings → Audio → Music folder; `platform/music_folder.h`) is
+read by its path like everywhere else, not through the documents API: the game asks for
+`READ_MEDIA_AUDIO` (`READ_EXTERNAL_STORAGE` before Android 13; Android 10 needs
+`requestLegacyExternalStorage`), which lets an app read audio files by path from Android 11
+on, then shows the system's folder picker (`ACTION_OPEN_DOCUMENT_TREE`).
+`GT3Activity.treePath` turns the picked folder into a path: the device's storage and memory
+cards (`primary:` and volume ids), Downloads' `raw:` ids and the game's own folder; folders of
+other providers (cloud drives) have none and are refused. Without the permission (refused, or
+taken back in Android's settings) the library reads no folder, which keeps the playlist; the
+**Allow music access** row opens the game's page in Android's settings. To test without the
+picker's dialogs: `adb shell pm grant <package> android.permission.READ_MEDIA_AUDIO` and set
+`[music] folder` in `config.ini`.
 
 Useful checks: `adb emu sensor set acceleration x:y:z` for tilt steering,
 `settings put system user_rotation N` (with `accelerometer_rotation 0`)
@@ -208,7 +225,8 @@ providers), and a bookmark of it in the app's user defaults opens it again at th
 An image copied into the GT3 Revisited folder needs no
 bookmark; its saved path is moved into the next install's folder, which iOS names anew
 (`rebase_app_container_path`). No document type is declared: opening an image from the Files
-app would copy it into the app.
+app would copy it into the app. The music folder is picked the same way (a folder in the
+document picker) and keeps its access with a bookmark too (`restore_music_access`).
 
 The simulator needs its own build tree (the SDK is chosen at configure time):
 
@@ -273,7 +291,7 @@ system or Homebrew SDL.
 | Package | Contents | Build |
 |---|---|---|
 | macOS (arm64, macOS 12+) | `gt3r.app` (icon, Info.plist, `.iso` document type, ad-hoc signature), `gt3tool`, README, LICENSE, `Barlow-OFL.txt` | `cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release -DGT3R_FETCH_SDL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0`, build `gt3r gt3tool`, `cmake --install build-rel --prefix dist`, `ditto -c -k --keepParent` |
-| Windows x64 | `gt3r.exe` (icon resource), `gt3tool.exe`, `SDL3.dll`, README, LICENSE, `Barlow-OFL.txt` | same with `-DGT3R_SDL_SHARED=ON`; zip |
+| Windows x64 | `gt3r.exe` (icon resource), `gt3tool.exe`, `SDL3.dll`, ANGLE's `libEGL.dll` and `libGLESv2.dll` with `LICENSE-ANGLE.txt`, README, LICENSE, `Barlow-OFL.txt` | same with `-DGT3R_SDL_SHARED=ON -DGT3R_ANGLE_DIR=<ANGLE>` (vcpkg's `angle` port with `packaging/vcpkg-triplets`, [RENDERING](RENDERING.md#opengl-es)); zip |
 | Linux x86_64 | `bin/gt3r`, `bin/gt3tool`, `share/applications/gt3r.desktop`, icon, README, LICENSE, `Barlow-OFL.txt` (`share/doc/gt3r`) | same; `tar czf` (built on Ubuntu 22.04 for an older glibc) |
 | Android | `gt3r-<tag>-android.apk`, signed with the project's release key (CI secrets; [android/README.md](../../android/README.md#release-signing)) | `./gradlew assembleRelease` |
 | Meta Quest | `gt3r-<tag>-quest.apk`, the VR build, same key | `android/fetch-sdl.sh --xr`, `./gradlew assembleRelease -Pquest` ([VR](VR.md)) |

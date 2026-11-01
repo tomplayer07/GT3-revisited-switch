@@ -13,6 +13,7 @@
 #include "game/gt_save.h"
 #include "platform/aspect.h"
 #include "platform/ios_files.h"
+#include "platform/music_folder.h"
 #include "platform/recent_discs.h"
 #include "platform/render_scale.h"
 #include "platform/mac_layer.h"
@@ -89,8 +90,10 @@ bool App::init(int argc, char** argv) {
     log_defer_diagnostics(defer_logs);
     LOG_INFO("Switch periodic diagnostics: %s", defer_logs ? "RAM buffer, flush on race/app exit" : "immediate SD writes");
 #endif
-    // iOS: the remembered disc images readable again (another install's folder, picked files).
-    if (platform::restore_disc_access(config_, data_dir_) && !config_.save(config_path_))
+    // iOS: the remembered disc images and music folder readable again (another install's
+    // folder, picked ones).
+    const bool restored = platform::restore_disc_access(config_, data_dir_);
+    if ((platform::restore_music_access(config_, data_dir_) || restored) && !config_.save(config_path_))
         LOG_WARN("Could not save %s", config_path_.c_str());
     LOG_INFO("User data: %s", data_dir_.c_str());
     set_speed_unit(parse_speed_unit(config_.get("race", "units").value_or(""))); // menus and races
@@ -132,10 +135,16 @@ bool App::init(int argc, char** argv) {
         if (d > 0.1f) SDL_SetWindowSize(window_, int(std::lround(1170 / d)), int(std::lround(540 / d)));
     }
     // Preferred: an SDL_GPU device shared by the 3D renderer and the 2D UI
-    // renderer. Fallback: a plain SDL_Renderer (native Metal/D3D/Vulkan/GLES
-    // backend) and no 3D. [video] gpu=0 or --no-gpu forces the fallback.
+    // renderer, or where SDL_GPU cannot drive the GPU, the OpenGL ES one
+    // (render/gpu_gles.h). Fallback: a plain SDL_Renderer (native Metal/D3D/
+    // Vulkan/GLES backend) and no 3D. [video] gpu = auto | gles (OpenGL ES
+    // first, --gles) | gles_driver (Windows: the same with the driver's OpenGL
+    // ES, not ANGLE, --gles-driver) | 0 (the fallback, --no-gpu).
     render::GpuOptions gpu_opts;
-    bool use_gpu = config_.get("video", "gpu").value_or("1") != "0";
+    const std::string gpu_cfg = to_lower(config_.get("video", "gpu").value_or("auto"));
+    bool use_gpu = gpu_cfg != "0" && gpu_cfg != "off";
+    gpu_opts.gles = gpu_cfg == "gles" || gpu_cfg == "gles_driver";
+    gpu_opts.angle = gpu_cfg != "gles_driver";
     gpu_opts.switch_uniform_stream = config_.get("video", "switch_uniform_stream").value_or("off") != "off";
     gpu_opts.switch_freeze_textures = config_.get("video", "switch_freeze_textures").value_or("off") == "on";
     gpu_opts.switch_texture_rotate = config_.get("video", "switch_texture_rotate").value_or("off") == "on";
@@ -146,11 +155,14 @@ bool App::init(int argc, char** argv) {
     if (auto v = config_.get("video", "anisotropy")) gpu_opts.anisotropy = std::atoi(v->c_str());
     if (auto v = config_.get("video", "vsync")) gpu_opts.vsync = *v != "0";
     if (auto v = config_.get("video", "gpu_debug")) gpu_opts.debug = *v == "1";
+    show_fps_ = to_lower(config_.get("video", "show_fps").value_or("off")) == "on";
     // [video] render_scale = auto | 0.5..4.0 (auto: native on desktop, capped on mobile)
     std::optional<float> render_scale = platform::parse_render_scale(config_.get("video", "render_scale").value_or("auto"));
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--no-gpu") use_gpu = false;
+        else if (a == "--gles") gpu_opts.gles = true, gpu_opts.angle = true;
+        else if (a == "--gles-driver") gpu_opts.gles = true, gpu_opts.angle = false;
         else if (a == "--msaa" && i + 1 < argc) gpu_opts.msaa = std::atoi(argv[++i]);
         else if (a == "--render-scale" && i + 1 < argc)
             render_scale = platform::parse_render_scale(argv[++i]), render_scale_arg_ = true;
@@ -206,6 +218,10 @@ bool App::init(int argc, char** argv) {
     input_ = std::make_unique<InputManager>();
     input_->load(config_);
     touch_.load(config_);
+    SDL_CreateDirectory(default_music_dir().c_str());
+    music_.set_playlist_file(data_dir_ + "music_playlist.txt");
+    music_.set_song_list_file(data_dir_ + "music_songs.txt");
+    follow_music_folder(false);
     audio_ = std::make_unique<AudioEngine>(config_.get("audio", "device").value_or(""));
     if (auto vol = config_.get("audio", "music_volume")) audio_->set_music_volume(std::strtof(vol->c_str(), nullptr));
     if (auto vol = config_.get("audio", "sfx_volume")) audio_->set_sfx_volume(std::strtof(vol->c_str(), nullptr));
@@ -364,6 +380,7 @@ void App::rescan_mods() {
     if (!vfs_) return;
     vfs_->scan_mods(mods_dir(), &config_);
     game::reload_gt_mode_data(); // loaded at the first title menu, with the mods of then
+    measure_disc_music();
 }
 
 void App::set_mod_enabled(const std::string& id, bool enabled) {
@@ -372,6 +389,23 @@ void App::set_mod_enabled(const std::string& id, bool enabled) {
     if (!vfs_) return;
     vfs_->set_mod_enabled(id, enabled);
     game::reload_gt_mode_data();
+    measure_disc_music();
+}
+
+void App::measure_disc_music() {
+    if (!vfs_ || !audio_) return;
+    std::vector<race::MusicLibrary::StreamOpener> songs;
+    std::string names;
+    for (const std::string& file : audio_->bgm().files(*vfs_, bgm::kRace)) {
+        const std::string path = "bgm/" + file;
+        std::optional<Vfs::Stream> stream = vfs_->open_stream(path);
+        if (!stream) continue;
+        names += path + ':' + std::to_string(stream->size) + '\n';
+        songs.push_back([read = stream->read] { return open_ads_music(read); });
+    }
+    char key[24];
+    std::snprintf(key, sizeof(key), "%016llx", static_cast<unsigned long long>(race::custom_song_id(names, 0)));
+    music_.set_disc_songs(songs.empty() ? std::string() : key, std::move(songs));
 }
 
 std::string App::open_disc(const std::string& path) {
@@ -387,6 +421,7 @@ std::string App::open_disc(const std::string& path) {
         vfs_->scan_mods(mods_dir(), &config_);
         printf("[App] Applying language...\n"); fflush(stdout);
         apply_language();
+        measure_disc_music();
         config_.set("game", "disc", full);
         platform::save_recent_discs(config_, platform::push_recent_disc(recent_discs(), full));
         printf("[App] Saving config...\n"); fflush(stdout);
@@ -447,6 +482,44 @@ void App::set_limit_60fps(bool on) {
     config_.set("video", "limit_60fps", on ? "on" : "off");
     save_config();
     apply_frame_limit();
+}
+
+void App::set_show_fps(bool on) {
+    show_fps_ = on;
+    config_.set("video", "show_fps", on ? "on" : "off");
+    save_config();
+}
+
+// [video] show_fps: the frames drawn per second in a corner of the window (of a phone's safe
+// area: clear of its cutout and rounded corners; in VR, of the virtual screen), at the size of
+// 640x360 UI text whatever the screen's layout, over everything. Top left, clear of the race HUD
+// and the game's menus; on our own screens (`frontend`: Screen::adaptive_ui), whose header runs
+// along the top, bottom right, beside the footer's hints.
+void App::draw_fps(bool frontend) {
+    if (!show_fps_ || fps_shown_ <= 0) return;
+    int lw = 0, lh = 0;
+    SDL_RendererLogicalPresentation mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_GetRenderLogicalPresentation(renderer_, &lw, &lh, &mode);
+    SDL_SetRenderLogicalPresentation(renderer_, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    int pw = 0, ph = 0, ww = 0, wh = 0;
+    SDL_GetCurrentRenderOutputSize(renderer_, &pw, &ph);
+    SDL_GetWindowSize(window_, &ww, &wh);
+#if GT3R_XR
+    if (xr_) ww = pw; // the canvas stands in for the window
+#endif
+    const float k = float(ph) / Ui::kHeight; // pixels per UI unit
+    const SDL_FRect sa = safe_area_window();
+    const float to_ui = ww > 0 ? float(pw) / float(ww) / k : 1; // window units -> UI units
+    char text[16];
+    std::snprintf(text, sizeof(text), "%d FPS", int(std::lround(fps_shown_)));
+    const float w = std::ceil(Ui::text_width(text)) + 8, h = Ui::kChar + 4;
+    float x = std::round(sa.x * to_ui) + 2, y = std::round(sa.y * to_ui) + 2;
+    if (frontend) x = std::round((sa.x + sa.w) * to_ui) - 2 - w, y = std::round((sa.y + sa.h) * to_ui) - 2 - h;
+    SDL_SetRenderScale(renderer_, k, k);
+    ui_->fill_round(x, y, w, h, 3, Color{0, 0, 0, 150});
+    ui_->text(x + 4, y + 2, text);
+    SDL_SetRenderScale(renderer_, 1, 1);
+    SDL_SetRenderLogicalPresentation(renderer_, lw, lh, mode);
 }
 
 platform::Aspect App::aspect() const {
@@ -540,6 +613,7 @@ void App::reset_dynamic_scale() {
 
 void App::close_disc() {
     if (audio_) audio_->stop_music();
+    music_.set_disc_songs({}, {}); // its songs' measuring reads this disc
     game::close_gt_mode(); // its data, reader and save library belong to this disc
     vfs_.reset();
     disc_.reset();
@@ -619,6 +693,8 @@ SDL_AppResult App::iterate() {
 #endif
     double dt = frame_s;
     last_ticks_ = now;
+    ++fps_frames_, fps_time_ += frame_s;
+    if (fps_time_ >= 0.5) fps_shown_ = fps_frames_ / fps_time_, fps_frames_ = 0, fps_time_ = 0;
     if (dt > 0.1) dt = 0.1;
     // --shot: step exactly one 60 Hz frame per iteration, so a shot of frame N shows the same
     // simulation time on every run (comparison screenshots are repeatable).
@@ -639,6 +715,7 @@ SDL_AppResult App::iterate() {
     }
 
     updates().poll(*this);
+    music_.poll();
     apply_screen_changes();
     Screen* top = screens_.empty() ? nullptr : screens_.back().get();
     updates().frame(*this, top && top->update_prompts());
@@ -694,6 +771,7 @@ SDL_AppResult App::iterate() {
     Uint64 h_r1 = SDL_GetTicksNS();
     touch_.set_safe_area(safe_area_window());
     touch_.render(*ui_);
+    draw_fps(shown && shown->adaptive_ui());
     if (phone_sim_) draw_phone_mask();
     if (pointer_shown_) { // a scripted pointer's arrow (screenshots)
         const float x = pointer_x_, y = pointer_y_;
@@ -812,6 +890,12 @@ SDL_AppResult App::event(const SDL_Event& e) {
         }
     }
     if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED && limit_60fps()) apply_frame_limit(); // another refresh rate
+    // Songs copied in while the game was away (the Files app on phones), and music access
+    // allowed or taken back in Android's settings meanwhile.
+    if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) follow_music_folder(true);
+    // Phones and tablets: no songs measured while the game is in the background.
+    if (platform::is_mobile() && (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND || e.type == SDL_EVENT_DID_ENTER_FOREGROUND))
+        music_.set_away(e.type == SDL_EVENT_WILL_ENTER_BACKGROUND);
     if (e.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED || e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
         e.type == SDL_EVENT_DID_ENTER_FOREGROUND)
         display_insets_.reset(), insets_retry_ = 0; // re-query (rotation, foldables)
@@ -919,6 +1003,7 @@ void App::draw_phone_mask() {
     SDL_RendererLogicalPresentation mode;
     SDL_GetRenderLogicalPresentation(renderer_, &lw, &lh, &mode);
     SDL_SetRenderLogicalPresentation(renderer_, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    clip_to_whole_window(renderer_);
     // Rounded corners (radius 113 px at 1080 px) and the punch-hole camera.
     const float k = float(ph) / 1080.0f, rad = 113 * k;
     SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
@@ -934,6 +1019,7 @@ void App::draw_phone_mask() {
         float w = std::sqrt(std::max(0.0f, cr * cr - y * y));
         SDL_RenderLine(renderer_, cx - w, cy + y, cx + w, cy + y);
     }
+    SDL_SetRenderClipRect(renderer_, nullptr);
     SDL_SetRenderLogicalPresentation(renderer_, lw, lh, mode);
 }
 
@@ -1142,7 +1228,31 @@ void App::xr_pointer() {
 }
 #endif
 
+std::string App::music_folder() const {
+    const std::string f = config_.get("music", "folder").value_or("");
+    return f.empty() ? default_music_dir() : f;
+}
+
+bool App::music_folder_chosen() const { return !config_.get("music", "folder").value_or("").empty(); }
+
+void App::set_music_folder(const std::string& path) {
+    // The game's own folder picked in a picker (Android's and iOS's show it) is the default.
+    if (path.empty() || race::same_folder(path, default_music_dir())) config_.remove("music", "folder");
+    else config_.set("music", "folder", path);
+    save_config();
+    follow_music_folder(false);
+}
+
+void App::follow_music_folder(bool rescan) {
+    const std::string folder = music_folder();
+    music_access_ = platform::music_access(folder, data_dir_);
+    if (!music_.set_folder(music_access_ ? folder : std::string()) && rescan) music_.rescan();
+}
+
+bool App::show_song() const { return to_lower(config_.get("music", "show_song").value_or("on")) != "off"; }
+
 void App::shutdown() {
+    music_.cancel(); // a folder scan's thread reads files through SDL
     remember_race_scale();
     if (input_) save_config();
     screens_.clear();

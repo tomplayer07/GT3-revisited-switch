@@ -57,7 +57,7 @@ are in [CONTRIBUTING](CONTRIBUTING.md).
 This fork brings native Nintendo Switch support to *GT3 Revisited*, compiling directly to a standalone `.nro` homebrew binary.
 
 ### Key Changes from Upstream
-- **OpenGL ES 3.0 Rendering Backend**: Upstream GT3 Revisited is designed strictly around Vulkan. Because homebrew Vulkan on Horizon OS is experimental and lacks stable driver integration, this port adds a native GLES 3.0 pipeline via Mesa on top of `libnx` and SDL3.
+- **OpenGL ES 3.0 Rendering Backend**: The Switch port uses its own GLES 3.0 pipeline via Mesa/Nouveau, `libnx` and SDL3. Upstream 0.5.0 also provides an OpenGL ES fallback for PCs; that separate SDL_GPU adapter is disabled on Switch to preserve the tested console renderer.
 - **Tegra X1 Shaders & Pipeline**: Converted SPIR-V shader programs into optimized GLES 3.0 GLSL with UBO caching, static uniform block binding, and normal matrix fast-paths for static course geometry.
 - **Switch Audio Engine**: Native SDL3 audio device integration with 48-voice software mixing and engine synthesis.
 - **Input Mapping**: Fully configured for Joy-Cons and Nintendo Switch Pro Controller with remappable analog throttle/brake and rumble.
@@ -204,13 +204,17 @@ certificate, so the first launch needs one extra step:
 - **Nintendo Switch**: copy `gt3r.nro` to `sdmc:/switch/gt3r/gt3r.nro` and launch via title override. See [Nintendo Switch Port](#-nintendo-switch-port).
 
 - **Windows**: unzip and run `gt3r.exe`. If SmartScreen says "Windows
-  protected your PC", choose **More info → Run anyway**.
+  protected your PC", choose **More info → Run anyway**. 3D runs on Vulkan,
+  or on GPUs without it (e.g. GeForce 400/500, Intel HD 2000–4000) on OpenGL
+  ES through ANGLE, which the package includes.
 - **macOS** (Apple Silicon, macOS 12 or later): unzip and move `gt3r.app`
   to Applications. On the first launch macOS says it cannot verify the app;
   open **System Settings → Privacy & Security**, scroll down and choose
   **Open Anyway** next to GT3 Revisited. Later launches open normally.
-- **Linux** (x86_64): extract the archive and run `gt3r`. It needs a Vulkan
-  driver (Mesa's `mesa-vulkan-drivers` on AMD / Intel, or your GPU vendor's).
+- **Linux** (x86_64): extract the archive and run `gt3r`. 3D needs a Vulkan
+  driver (Mesa's `mesa-vulkan-drivers` on AMD / Intel, or your GPU vendor's),
+  or on older GPUs without Vulkan, OpenGL ES 3.0 (Mesa, or NVIDIA's legacy
+  drivers).
 - **Android** (7.0 or later, arm64 or x86_64): open the `.apk` on the device
   and allow installing from that source when asked. In countries where
   Android requires verified developers for sideloaded apps, use Android's
@@ -307,7 +311,46 @@ beside it instead.
 | `saves/` | GT Mode saves (below) |
 | `replays/` | saved replays (`.gt3replay`), listed by the Replay Theater and Time trial |
 | `mods/` | installed mods ([MODDING](docs/MODDING.md)) |
+| `music/` | your own race music (below), unless Settings chooses another folder |
+| `music_playlist.txt` | your songs' playlist (their order and check marks) |
+| `music_songs.txt` | your songs as the last scan found them, and how loud each is (so the next start has them at once) |
 | `screenshots/` | F12 screenshots |
+
+### Your music
+
+Your own MP3, FLAC and WAV files can play as race songs. Put them in the user
+data folder's `music/` (at any depth; on phones and tablets the Files app shows
+it as GT3 Revisited > music), or choose the folder they're in with **Settings →
+Audio → Music folder**: they play from there, nothing is copied. On Android the
+game asks to read your music files, and the folder has to be on the device or
+its memory card (not in a cloud drive's app); if you take that permission back
+in Android's settings, Settings says so and your playlist waits for it. On iOS
+the folder is picked as in the Files app (On My iPhone, iCloud Drive). Titles and artists come from the files'
+tags (ID3, FLAC comments, WAV INFO), otherwise from the file name. AAC (`.m4a`),
+Ogg and other formats don't play, nor do damaged files; Settings counts the files
+it skipped. Every folder inside is searched, linked folders too (32 levels deep at
+most; names starting with `.` are skipped), up to 10,000 songs (the first ones in
+name order). Moving an album's folder keeps its songs' check marks and order. If
+the music folder can't be read (a drive unplugged), your playlist is kept for when
+it's back. The songs found are remembered, so the next start has them at once,
+before it has looked through the folder again.
+
+Your songs play as loud as the disc's race songs: the game turns each one up or
+down to the disc songs' average, by at most 12 dB up (less when that would
+clip) and 20 dB down. A song is measured the first time it plays (it eases to
+its level a moment after it starts) and the next song in your list while it
+plays, so most start at the right level; what was measured is remembered.
+
+The game's **Options → Favorite Music List** then has three tabs over the list
+(Up from the first song, or L1 / R1): **Original** plays the disc's race songs
+as the original does, **Custom** only yours, **Both** the two lists mixed song
+by song (Shuffle draws from both evenly; Order takes turns, one of each). Each
+tab's list is edited as the original's is: check marks, the order, Order /
+Shuffle (also at the right of the tab row, so it's in reach of a long list).
+L2 / R2 jump a screen of songs at a time; a drag or the mouse wheel scrolls.
+Without songs in the folder the tabs are hidden and the disc's list plays. In races, the pause screen shows the song with L1 / R1 to skip, and
+Next / Previous song can be bound to chords or touch buttons
+([INPUT](docs/INPUT.md#song-controls)).
 
 ### Settings
 
@@ -328,18 +371,23 @@ are only there:
 | `[video] aspect` | `16:9` / `4:3` / `fill` | the game's picture: 16:9 (default), 4:3 like on a 4:3 TV, or the whole screen (races use its full width; menus and movies stay 4:3) |
 | `[video] vsync` | `1` / `0` | wait for the display refresh |
 | `[video] limit_60fps` | `on` / `off` | on 120 Hz and faster displays, draw about 60 frames a second (every Nth refresh) |
+| `[video] show_fps` | `on` / `off` | the frame rate in a corner of the screen (default off) |
 | `[video] msaa` | `1` `2` `4` `8` | 3D anti-aliasing (clamped to the GPU); default 4, 2 on phones, tablets and the Quest (Android, iOS) |
 | `[video] anisotropy` | `1` `2` `4` `8` `16` | anisotropic texture filtering (`1` = off); default 4 |
 | `[video] render_scale` | `auto`, `0.5`..`4.0` | 3D resolution vs. the screen; above `1.0` the 3D views render larger and are scaled down (supersampling), up to 16384 pixels a side |
 | `[video] dynamic_resolution` | `on` / `off` | lower the 3D resolution (to 50% at most) when the GPU can't keep up and raise it while it keeps up, up to `render_scale`; with `auto`, up to the screen's full resolution (at most 1440 lines), starting where the last race ended (kept in `dynamic_start`). Default on for phones and tablets |
 | `[video] full_car_detail` | `on` / `off` | every car in full detail at any distance; `off`: distant cars switch to GT3's simpler models. Default on, off for phones and tablets |
-| `[video] gpu` | `1` / `0` | SDL_GPU 3D renderer; `0` = 2D-only (restart required) |
+| `[video] gpu` | `auto` / `gles` / `gles_driver` / `0` | the 3D renderer: `auto` = SDL_GPU (Vulkan, Metal), or OpenGL ES where the GPU has no Vulkan (Windows, Linux); `gles` = OpenGL ES first; `gles_driver` = the same on Windows with the graphics driver's OpenGL ES rather than ANGLE; `0` = 2D-only (restart required). Settings offers only the kinds of OpenGL ES that open on the computer |
 | `[video] original_res` | `on` / `off` | *(file)* races at the PS2's 640×448 in a 4:3 frame |
 | `[video] original_filter` | `nearest` / `bilinear` | *(file)* upscaling filter for `original_res` |
 | `[video] car_reflections`, `car_shadows` | `on` / `off` | *(file)* |
 | `[audio] device` | device name | output device (Windows, macOS, Linux); absent: the system default. A device that isn't connected plays on the default until it is |
 | `[audio] music_volume`, `sfx_volume` | `0.0`..`1.0` | |
 | `[audio] surround_cue` | `on` / `off` | GT3's rear-channel phase cue for Pro Logic decoders |
+| `[music] folder` | path | your music folder (absent: the user data folder's `music/`; Settings → Audio) |
+| `[music] show_song` | `on` / `off` | the race song on the pause screen, with L1 / R1 to skip (default on) |
+| `[music] next_race` | `same` / `next` | same (default): a race, restart or replay starts with the song the last one ended on, from its start; next: a new song every time, as GT3 does (Settings → Audio → Next race starts with) |
+| `[music] race_song` | text | the race song playing last (`disc:` or `yours:` and its id), for `next_race = same` |
 | `[race] views` | `all` / `gt3` | race views: GT3's plus bumper without mirror and far chase, or GT3's only |
 | `[race] camera_shake` | `on` / `off` | GT3's in-car vibration |
 | `[race] units` | `kmh` / `mph` | speed unit in races and menus (absent: the disc's, mph on the North American disc, km/h on the European and Japanese ones) |
@@ -347,11 +395,12 @@ are only there:
 | `[race] analog_response` | `linear` / `original` | sticks, triggers, wheels, touch and tilt: a linear response (default) or GT3's DualShock 2 curves (Settings → Controls) |
 | `[input] background` | `on` / `off` | desktop: controllers and wheels keep driving the game while another window is in front, e.g. on a second monitor (default off; Settings → Controls). The keyboard works only in the game's window |
 | `[player1]`, `[player2]` | `controller` (auto, a device name, or keyboard), `keyboard`, `race`, `rumble` (auto, modern, gt3); `phone_vibration` (player 1, Android) | see [INPUT](docs/INPUT.md#controller) |
+| `[player1.actions]`, `[player2.actions]` | `next_song`, `previous_song` | the song controls' chords ([INPUT](docs/INPUT.md#song-controls)) |
 | `[ffb]` | see [INPUT](docs/INPUT.md) | DualSense/Xbox triggers and wheel force feedback |
 | `[touch]` | see [INPUT](docs/INPUT.md#touch-controls-phones-and-tablets) | on-screen controls on phones and tablets; Customize layout moves, resizes and hides each one |
 | `[online] server` | host name | relay server (default `gt3r.gameversions.com`; set in the lobby) |
 | `[online] update_check` | `on` / `off` | ask the relay server for a newer version at startup (Settings → Online) |
-| `[options]` | | the game's own Options menu (set in game) |
+| `[options]` | | the game's own Options menu (set in game); ours: `music_source` (`original` / `custom` / `both`) and `music_mix` (Both's `order` / `shuffle`), the music list's tabs |
 | `[mods]` | | see [MODDING](docs/MODDING.md) |
 
 ### Saves
@@ -431,6 +480,12 @@ players, each on their own machine:
 - The host's **Car rules** limit the cars: class, production or race cars,
   drivetrain, NA or turbo, stock cars only, a power limit, mod cars. The car
   page can list only the cars allowed.
+- A GT Mode car races only with parts and settings the game's tune shop and
+  settings menu can give it; any other setup (an edited save, say) is refused.
+- **Stability control (ASM)** and **Traction control (TCS)** are your own
+  choice, on the start page or in the lobby. They are the same switches as
+  the Options menu's driver's assist page, so a change in one place applies
+  everywhere.
 - Every lobby page works with a mouse, touch or a VR controller's pointer too.
 - Mod cars are offered to the other players as checked downloads.
 - The other players can see your IP address, as in any peer-to-peer game.
@@ -497,8 +552,11 @@ cmake --build build -j
   in a `.tbd` file, your linker is older than your SDK: update Xcode / the
   Command Line Tools, or point `-DCMAKE_OSX_SYSROOT` at an older SDK.
 - **Windows**: Visual Studio 2022 or later. `cmake -S . -B build` then build
-  `gt3r`. SDL3 is fetched automatically, or install it with vcpkg. 3D needs
-  a GPU driver with Vulkan.
+  `gt3r`. SDL3 is fetched automatically, or install it with vcpkg. 3D uses
+  Vulkan, or OpenGL ES 3.0 on GPUs without it: the driver's, or ANGLE's when
+  `-DGT3R_ANGLE_DIR=<folder>` points at a folder with its DLLs and license
+  (`vcpkg install angle:x64-windows-angle --overlay-triplets=packaging/vcpkg-triplets`;
+  [RENDERING](docs/dev/RENDERING.md#opengl-es)).
 - **Linux**: install your distro's SDL3 development package, or let CMake
   fetch and build it. Building SDL needs its window, audio and input
   headers; on Debian / Ubuntu (tested on Ubuntu 24.04):
@@ -528,7 +586,7 @@ read [CONTRIBUTING](CONTRIBUTING.md) before sending changes.
 
 ```text
 gt3r [disc.iso] [--hub] [--screen <id>] [--browse <vol path>] [--shot <out.png>]
-     [--msaa <n>] [--render-scale <s>] [--no-gpu] [--help]
+     [--msaa <n>] [--render-scale <s>] [--no-gpu] [--gles] [--gles-driver] [--help]
 ```
 
 - `--help` lists the options, every screen id and the testing variables (`GT3R_*`).
@@ -599,5 +657,13 @@ original program's code in any form.
   your disc.
 - [stb_truetype](https://github.com/nothings/stb) v1.26 by Sean Barrett,
   public domain (or MIT), rasterises that font.
+- [dr_mp3, dr_flac and dr_wav](https://github.com/mackron/dr_libs) by David
+  Reid, public domain (or MIT-0), decode your own music
+  ([third_party/dr_libs](third_party/dr_libs)).
 - [SDL 3](https://libsdl.org) and [zlib](https://zlib.net), zlib License,
   fetched at build time (Windows builds ship `SDL3.dll`).
+- The [Khronos](https://github.com/KhronosGroup/OpenGL-Registry) OpenGL ES 3.0
+  headers (`third_party/khronos`), MIT and Apache 2.0, for the OpenGL ES renderer.
+- [ANGLE](https://chromium.googlesource.com/angle/angle), BSD 3-Clause, built
+  with vcpkg: Windows packages ship `libEGL.dll` and `libGLESv2.dll` with its
+  license (`LICENSE-ANGLE.txt`).

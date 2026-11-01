@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GT3Revisited VERSION 0.4.3 LANGUAGES C CXX)
+project(GT3Revisited VERSION 0.5.0 LANGUAGES C CXX)
 
 # GT3 Revisited: an open reimplementation of the Gran Turismo 3 engine.
 # No game data is part of this project; everything is read at runtime from
@@ -74,6 +74,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     m
     -Wl,--end-group
   )
+endif()
+# The OpenGL ES 3.0 renderer (src/render/gpu_gles.*, docs/dev/RENDERING.md "OpenGL ES"): the
+# fallback for PCs whose GPU SDL_GPU has no backend for (no Vulkan). It compiles to nothing
+# without GT3R_GLES.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND (WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID)))
+  set(_gt3r_gles_default ON)
+else()
+  set(_gt3r_gles_default OFF)
+endif()
+option(GT3R_GLES "OpenGL ES 3.0 fallback renderer" ${_gt3r_gles_default})
+# Switch retains its native GLES path; the SDL_GPU adapter is for desktop builds.
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  set(GT3R_GLES OFF)
+endif()
+if(GT3R_GLES)
+  target_compile_definitions(gt3r_engine PUBLIC GT3R_GLES=1)
+  target_include_directories(gt3r_engine SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/khronos)
 endif()
 
 # The game's version: project(... VERSION) above is the only source. gt3r_version.h
@@ -161,6 +178,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
   )
 else()
   target_link_libraries(${GT3R_APP_TARGET} PRIVATE gt3r_engine)
+endif()
+
+# Windows: ANGLE (OpenGL ES on Direct3D 11) for the OpenGL ES renderer, copied next to gt3r.exe
+# and packaged with it: libEGL.dll, libGLESv2.dll and LICENSE-ANGLE.txt, built with vcpkg as CI's
+# Windows package job does (packaging/vcpkg-triplets). Without it the renderer uses the driver's
+# OpenGL ES.
+set(GT3R_ANGLE_DIR "" CACHE PATH "Windows: folder with ANGLE's libEGL.dll, libGLESv2.dll and LICENSE-ANGLE.txt")
+if(WIN32 AND GT3R_ANGLE_DIR)
+  set(GT3R_ANGLE_FILES ${GT3R_ANGLE_DIR}/libEGL.dll ${GT3R_ANGLE_DIR}/libGLESv2.dll)
+  foreach(f ${GT3R_ANGLE_FILES} ${GT3R_ANGLE_DIR}/LICENSE-ANGLE.txt)
+    if(NOT EXISTS ${f})
+      message(FATAL_ERROR "GT3R_ANGLE_DIR: ${f} is missing")
+    endif()
+  endforeach()
+  add_custom_command(TARGET gt3r POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GT3R_ANGLE_FILES} $<TARGET_FILE_DIR:gt3r>)
 endif()
 
 # UI font (Barlow, SIL OFL 1.1, third_party/fonts/barlow) compiled into the

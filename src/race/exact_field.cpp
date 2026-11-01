@@ -211,7 +211,7 @@ public:
         const bool battle = opts_.kind == ex::Conductor::Battle2P;
         humans_ = battle ? 2 : 1;
         try {
-            course_ = exact_course(opts_.course_file, opts_.course, *data_);
+            course_ = exact_course(opts_.course_bytes(), opts_.course, *data_);
         } catch (const std::exception& e) {
             if (error) *error = std::string("exact course: ") + e.what();
             return false;
@@ -329,11 +329,14 @@ public:
             rs.handicap = s32(std::lround(cfg_.handicap_m));
             rs.battle_catchup = std::clamp(cfg_.battle_catchup, 0, 2);
         }
+        // Every entry on the course's tyres, the dirt or wet records, as GT3 fits them before the race (course_tires); a recorded
+        // car (a whole-run ghost, a replay) as it raced.
         auto human = [&](const ExactHuman& h, int slot, std::string* err) -> std::optional<ex::StartEntry> {
             std::optional<ex::Equipment> eq = exact_equipment(db, h.car, err);
             if (!eq) return std::nullopt;
             ex::StartEntry e;
             e.eq = *eq;
+            ex::course_tires(db, e.eq, rs.course_category);
             e.human = 1;
             e.player = true;
             e.grid_slot = slot;
@@ -382,6 +385,7 @@ public:
         for (size_t i = 0; i < opps.size(); ++i) {
             ex::StartEntry e;
             e.eq = opps[i].eq;
+            ex::course_tires(db, e.eq, rs.course_category);
             e.grid_slot = slot_of[i];
             e.best_lap = seeded ? cfg_.entry_best[i + 1] : 0x157529FF;
             rs.entries.push_back(e);
@@ -435,7 +439,7 @@ public:
         for (size_t j = 0; j < cfg_.remote.size(); ++j) race_->set_posed(first_remote_ + int(j), true);
         rs_ = rs;
         rec_ = std::make_shared<ex::RaceRecord>(ex::RaceRecord::of(rs, opts_.course));
-        rec_->data = exact_data_fingerprint(db, rs.entries, opts_.course_file);
+        rec_->data = exact_data_fingerprint(db, rs.entries, opts_.course_bytes());
         change({0, ex::RaceChange::StartCountdown});
         std::vector<std::string> car_labels;
         const int first_opp = humans_ + (ghost_entry ? 1 : 0);
@@ -466,7 +470,7 @@ public:
             d->set_behaviour(r.behaviour);
             data_ = d;
         }
-        if (r.data && r.data != exact_data_fingerprint(db, r.entries, opts_.course_file)) {
+        if (r.data && r.data != exact_data_fingerprint(db, r.entries, opts_.course_bytes())) {
             if (error) *error = "the replay was recorded with other car or course data";
             return false;
         }

@@ -4,6 +4,7 @@
 // They need the program's tables and the courses from the disc (GT3R_DISC).
 
 #include "test_framework.h"
+#include "exact_drive.h"
 
 #include "disc/core_image.h"
 #include "disc/volume.h"
@@ -60,7 +61,7 @@ std::optional<Bytes> course_file(const std::string& label) {
 
 // Aim at the car's AI line ahead; full throttle below a speed that falls with the aim's angle, the brake above it (its top:
 // g_line_pace km/h).
-float g_line_pace = 150.0f;
+float g_line_pace = 145.0f;
 ex::PadFrame line_driver(const ex::Car& c, const ex::RaceCourse& course) {
     ex::PadFrame f;
     f.flags = 0x1F;
@@ -68,11 +69,9 @@ ex::PadFrame line_driver(const ex::Car& c, const ex::RaceCourse& course) {
     ex::F dx, dy;
     const int line = c.ai.line ? c.ai.line : 6;
     ex::ai_target(c, course.ai, line, c.ai.next, ex::F(12.0f) + ex::F(0.6f) * c.speed, dx, dy);
-    const float fx = c.fwd.x.host(), fy = c.fwd.y.host(), x = dx.host(), y = dy.host();
-    const float angle = std::atan2(fx * y - fy * x, fx * x + fy * y);
-    f.steer = s16(std::lround(std::clamp(angle * 2.5f, -1.0f, 1.0f) * 4096.0f));
-    const float kmh = c.speed.host() * 3.6f, limit = g_line_pace - 300.0f * std::fabs(angle);
-    if (kmh < limit) f.throttle = 4096;
+    const ex::F angle = test::heading_angle(c, dx, dy); // (EE floats: the same frames on every platform)
+    f.steer = s16(std::lround(std::clamp(angle.host() * 2.5f, -1.0f, 1.0f) * 4096.0f));
+    if (c.speed * ex::F(3.6f) < ex::F(g_line_pace) - ex::F(300.0f) * ee::abs(angle)) f.throttle = 4096;
     else f.brake = 2048;
     return f;
 }
@@ -118,7 +117,7 @@ SoloRun solo(const std::string& event, ex::Conductor kind, int max_steps, int mi
     cfg.event = event;
     race::ExactFieldOptions o;
     o.data = program();
-    o.course_file = *file;
+    o.course_file = std::make_shared<const Bytes>(*file);
     o.course = ev->course;
     o.kind = kind;
     o.laps = ev->laps;
@@ -185,7 +184,7 @@ std::optional<ex::SoloRecorders> played_recorders(const std::string& event, std:
     cfg.event = event;
     race::ExactFieldOptions o;
     o.data = program();
-    o.course_file = *file;
+    o.course_file = std::make_shared<const Bytes>(*file);
     o.course = ev->course;
     o.kind = rec->kind;
     o.playback = rec;
@@ -274,7 +273,7 @@ TEST(exact_game_free_practice_field) {
         cfg.grid_by_power = true;
         race::ExactFieldOptions o;
         o.data = data;
-        o.course_file = *file;
+        o.course_file = std::make_shared<const Bytes>(*file);
         o.course = ev->course;
         o.kind = kind;
         o.laps = kind == ex::Conductor::FreePractice ? 0 : ev->laps;
@@ -409,7 +408,7 @@ TEST(exact_game_logger_pass) {
     cfg.event = "AT020001";
     race::ExactFieldOptions o;
     o.data = program();
-    o.course_file = *file;
+    o.course_file = std::make_shared<const Bytes>(*file);
     o.course = ev->course;
     o.kind = ex::Conductor::TimeTrial;
     o.player.car = {ev->entries[0]};
@@ -465,7 +464,7 @@ TEST(exact_game_analysis) {
     SoloRun a = solo("AT020001", ex::Conductor::TimeTrial, 12000, 0, nullptr, car);
     g_line_pace = 125.0f; // (track B slower)
     SoloRun b = solo("AT020001", ex::Conductor::TimeTrial, 14000, 0, nullptr, car);
-    g_line_pace = 150.0f;
+    g_line_pace = 145.0f;
     CHECK(a.record && b.record && !a.record->run_recording.empty());
     if (!a.record || !b.record) return;
     data::CarDatabase& db = *database();
@@ -477,7 +476,7 @@ TEST(exact_game_analysis) {
     cfg.event = "AT020001";
     race::ExactFieldOptions o;
     o.data = program();
-    o.course_file = *file;
+    o.course_file = std::make_shared<const Bytes>(*file);
     o.course = ev->course;
     o.kind = ex::Conductor::TimeTrial;
     o.player.car = {car};
@@ -566,7 +565,7 @@ TEST(exact_game_exit_as_finish) {
     cfg.event = "AT040001";
     race::ExactFieldOptions o;
     o.data = program();
-    o.course_file = *file;
+    o.course_file = std::make_shared<const Bytes>(*file);
     o.course = ev->course;
     o.kind = ex::Conductor::FreeRun;
     o.player.car = {ev->entries.empty() ? "r34_gtr_v_99" : ev->entries[0]};
@@ -624,7 +623,7 @@ TEST(exact_game_licence_over_the_times) {
     const race::LicenseTimes lt = race::license_times(*ev);
     g_line_pace = 60.0f; // (well under the pace a medal needs)
     SoloRun slow = solo("L0A0004", ex::Conductor::License, 30000);
-    g_line_pace = 150.0f;
+    g_line_pace = 145.0f;
     CHECK(slow.finished);
     CHECK(slow.result == 0 && posted(slow, 9));
     CHECK(slow.result_time > u32(lt.ms[2])); // slower than bronze

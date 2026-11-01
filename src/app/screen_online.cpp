@@ -1,11 +1,11 @@
 // Online battle lobby: the arcade menu's i.LINK Battle, over IP (docs/dev/ONLINE.md).
 //
 // Start page: host a battle (UDP port [online] port, default 47630) or join one by
-// address; the player name. Lobby page: the players (name, car, ready, ping), the
-// course and laps (the host chooses), the car rules (their own page), your car, colour
-// and gearbox, Ready / Start. The host starts when everyone is ready; every player's race
-// screen loads, and the countdown starts for all at once. After the race everyone comes
-// back here.
+// address; the player name; ASM and TCS. Lobby page: the players (name, car, ready, ping),
+// the course and laps (the host chooses), the car rules (their own page), your car, colour,
+// gearbox, ASM and TCS, Ready / Start. The host starts when everyone is ready; every
+// player's race screen loads, and the countdown starts for all at once. After the race
+// everyone comes back here.
 //
 // Every page takes the pad, the keyboard and pointers (mouse, touch, the VR controller's
 // pointer): rows follow a hovering pointer and act on a click (a finger's first tap
@@ -34,6 +34,7 @@
 #include "game/gt_mode_menu.h"
 #include "game/net_car.h"
 #include "game/mod_package.h"
+#include "menu/flow/options.h"
 #include "base/sha256.h"
 #include "menu/flow/menu_set.h"
 #include "menu/flow/game_hooks.h"
@@ -332,6 +333,8 @@ private:
         laps_ = num("laps", "2", 1, 99);
         paint_ = std::max(0, std::atoi(cfg.get("online", "paint").value_or("0").c_str()));
         manual_ = cfg.get("online", "gearbox").value_or("at") == "mt";
+        asm_on_ = menu::flow::option_value(&cfg, "assist_asm") != "off";
+        tcs_on_ = menu::flow::option_value(&cfg, "assist_tcs") != "off";
         rules_.allow_mods = cfg.get("online", "mods").value_or("on") != "off";
         ghost_ms_ = u16(num("ghost_ms", "150", 0, 1000));
         rules_.stock_only = cfg.get("online", "stock_only").value_or("off") == "on";
@@ -452,14 +455,16 @@ private:
     void announce_car() {
         net::Session& ns = net::online();
         game::OnlineCar oc = current_car();
-        if (oc.kind == game::OnlineCar::Kind::Mod && app_ && app_->vfs()) offer_own_package(oc);
+        const bool mod = oc.kind == game::OnlineCar::Kind::Mod || (oc.kind == game::OnlineCar::Kind::Garage && db_.mod_car(oc.car));
+        if (mod && app_ && app_->vfs()) offer_own_package(oc); // (a garage mod car's package travels after the digest)
         ns.set_car(oc.car, oc.paint);
         ns.set_car_info(game::encode_online_car(oc));
     }
 
     // --- mod car downloads (docs/dev/ONLINE.md "Mod cars") ---
 
-    // Our mod car's package: built once per car, offered to the session, its hash in our descriptor.
+    // Our mod car's package (from the car list or the garage): built once per car, offered to the session, its hash in
+    // our descriptor.
     void offer_own_package(game::OnlineCar& oc) {
         auto it = own_packages_.find(oc.car);
         if (it == own_packages_.end()) {
@@ -478,17 +483,19 @@ private:
         }
         oc.package = it->second.hash;
         oc.package_size = it->second.size;
-        if (oc.package.empty()) oc.kind = game::OnlineCar::Kind::Disc; // not shareable: others use a stand-in
+        // Not shareable: others use a stand-in (a garage car keeps its kind, without a package).
+        if (oc.package.empty() && oc.kind == game::OnlineCar::Kind::Mod) oc.kind = game::OnlineCar::Kind::Disc;
     }
 
-    // Other players' mod cars we lack: ask once per package (when the lobby allows mods).
+    // Other players' mod cars we lack (from their car list or garage) whose donor car is on this disc: ask once per
+    // package (when the lobby allows mods).
     void offer_downloads(const net::Session& ns) {
         if (!ns.settings().allow_mods) return;
         for (const net::Player& p : ns.players()) {
             if (int(p.id) == ns.my_id()) continue;
             const Bytes* info = ns.car_info(p.id);
             std::optional<game::OnlineCar> oc = info ? game::decode_online_car(*info) : std::nullopt;
-            if (!oc || oc->kind != game::OnlineCar::Kind::Mod || oc->package.empty() || db_.car(oc->car)) continue;
+            if (!oc || !game::mod_download_offered(db_, *oc)) continue;
             if (!asked_.insert(oc->package).second) continue;
             prompts_.push_back({p.id, p.name, *oc});
         }
@@ -590,6 +597,11 @@ private:
         return app_ ? int(car_picker_.paints(*app_, cars_[size_t(car_sel_)]).size()) : 1;
     }
     void status(std::string s, bool bad) { status_ = std::move(s), status_bad_ = bad; }
+    // ASM / TCS are the game's Options (arcade single race, free run and 2P read them too).
+    void toggle_aid(bool asm_row) {
+        bool& on = asm_row ? asm_on_ : tcs_on_;
+        on = !on;
+    }
 
     void remember(App& app) {
         IniDocument& cfg = app.config();
@@ -602,6 +614,8 @@ private:
         cfg.set("online", "laps", std::to_string(laps_));
         cfg.set("online", "paint", std::to_string(paint_));
         cfg.set("online", "gearbox", manual_ ? "mt" : "at");
+        cfg.set("options", "assist_asm", asm_on_ ? "on" : "off"); // the game's Options page shows them too
+        cfg.set("options", "assist_tcs", tcs_on_ ? "on" : "off");
         cfg.set("online", "mods", rules_.allow_mods ? "on" : "off");
         cfg.set("online", "ghost_ms", std::to_string(ghost_ms_));
         cfg.set("online", "stock_only", rules_.stock_only ? "on" : "off");
@@ -702,7 +716,7 @@ private:
 
     // --- start page ---
 
-    enum StartRow { kCreate, kJoinCode, kHostIp, kJoinIp, kName, kServer, kBack, kStartRows };
+    enum StartRow { kCreate, kJoinCode, kHostIp, kJoinIp, kName, kServer, kStartAsm, kStartTcs, kBack, kStartRows };
     int start_row_ = kCreate; // the row the session was started from
 
     // Back to the start page (left, refused or disconnected) on the row the session came from,
@@ -733,6 +747,10 @@ private:
             app.pop();
             return;
         }
+        if (m.horizontal() && (sel_ == kStartAsm || sel_ == kStartTcs)) {
+            start_action(app, sel_, false);
+            return;
+        }
         bool circle = m.pressed(PadButton::Circle);
         if (m.pressed(PadButton::Cross) || circle) start_action(app, sel_, circle);
     }
@@ -758,6 +776,11 @@ private:
         case kJoinIp: begin_edit(Edit::Address, circle ? After::Nothing : After::JoinAddress); break;
         case kName: begin_edit(Edit::Name); break;
         case kServer: begin_edit(Edit::Server); break;
+        case kStartAsm:
+        case kStartTcs:
+            toggle_aid(sel_ == kStartAsm);
+            remember(app);
+            break;
         default: app.pop(); break;
         }
     }
@@ -829,9 +852,9 @@ private:
 
     void render_start(Ui& ui) {
         ui.header("ONLINE BATTLE", "i.LINK Battle over the internet or a LAN");
-        const char* labels[kStartRows] = {"Create a session", "Join with a code", "Host by address (LAN / port forward)",
-                                          "Join by address",  "Name",             "Relay server",
-                                          "Back"};
+        const char* labels[kStartRows] = {"Create a session",        "Join with a code",       "Host by address (LAN / port forward)",
+                                          "Join by address",         "Name",                   "Relay server",
+                                          "Stability control (ASM)", "Traction control (TCS)", "Back"};
         for (int i = 0; i < kStartRows; ++i) {
             float y = 46 + i * 24.0f + (i >= kName ? 10 : 0);
             bool f = i == sel_;
@@ -846,6 +869,8 @@ private:
             if (i == kJoinIp) v = address_.empty() ? "(enter address)" : address_;
             if (i == kName) v = name_;
             if (i == kServer) v = server_.empty() ? "(none)" : server_;
+            if (i == kStartAsm) v = asm_on_ ? "On" : "Off";
+            if (i == kStartTcs) v = tcs_on_ ? "On" : "Off";
             bool edit = editing_ && i == edit_row();
             if (edit) v = edit_target() + "_";
             if (!v.empty()) ui.text(330, y, Ui::clip(v, 260), edit ? colors::kAccent : colors::kDim);
@@ -913,7 +938,7 @@ private:
 
     // --- lobby page ---
 
-    enum Row { kCourse, kLaps, kGhost, kRules, kCar, kColour, kGearbox, kGo, kKick, kLeave, kRows };
+    enum Row { kCourse, kLaps, kGhost, kRules, kCar, kColour, kGearbox, kAsm, kTcs, kGo, kKick, kLeave, kRows };
     static constexpr float kRowY = 130, kRowH = 15;
     enum LobbyFooter { kFootLeave };
 
@@ -967,27 +992,35 @@ private:
     }
     std::string rule_problem(const net::Session& ns) const { return car_problem(ns, car_sel_); }
 
-    // Another player's car on this machine (game::online_car_here), by its descriptor.
-    game::CarHere car_here(const Bytes& info) const {
+    // Another player's car on this machine (game::online_car_here), by its descriptor, and why it is not a legal setup.
+    struct Here {
+        game::CarHere h = game::CarHere::Ok;
+        std::string why;
+    };
+    const Here& car_here(const Bytes& info) const {
         auto it = here_.find(info);
         if (it != here_.end()) return it->second;
-        game::CarHere h = game::CarHere::Ok; // a descriptor this game cannot read: nothing to check
+        Here h; // a descriptor this game cannot read: nothing to check
         if (std::optional<game::OnlineCar> oc = game::decode_online_car(info))
-            h = game::online_car_here(db_, program_.get(), *oc, [this](const std::string& model) {
-                return app_ && app_->vfs() && app_->vfs()->exists("cars/day/" + model);
-            });
-        return here_[info] = h;
+            h.h = game::online_car_here(
+                db_, program_.get(), *oc,
+                [this](const std::string& model) { return app_ && app_->vfs() && app_->vfs()->exists("cars/day/" + model); },
+                &h.why);
+        return here_[info] = std::move(h);
     }
     bool car_blocked(const net::Session& ns, const net::Player& p) const {
         const Bytes* info = int(p.id) == ns.my_id() ? nullptr : ns.car_info(p.id);
-        return info && game::car_here_blocks(car_here(*info));
+        return info && game::car_here_blocks(car_here(*info).h);
     }
     // Why this machine cannot race the lobby: no exact core here, or the first other player's car that cannot race here
-    // ("Bob's car has no model on this disc").
+    // ("Bob's car has no model on this disc", "Bob's car is not a legal setup: front spring rate out of range").
     std::string remote_car_problem(const net::Session& ns) const {
         if (!core_problem_.empty()) return core_problem_;
         for (const net::Player& p : ns.players())
-            if (car_blocked(ns, p)) return p.name + "'s car " + game::car_here_text(car_here(*ns.car_info(p.id)));
+            if (car_blocked(ns, p)) {
+                const Here& h = car_here(*ns.car_info(p.id));
+                return p.name + "'s car " + game::car_here_text(h.h) + (h.why.empty() ? "" : ": " + h.why);
+            }
         return {};
     }
 
@@ -1106,6 +1139,10 @@ private:
         case kGearbox:
             if (h || cross) manual_ = !manual_;
             break;
+        case kAsm:
+        case kTcs: // our own car's, Ready or not
+            if (h || cross) toggle_aid(row == kAsm);
+            break;
         case kGo:
             if (!cross) break;
             if (ns.is_host() && ns.relay_wait().waiting) { // in the relay's queue: give up waiting
@@ -1210,7 +1247,7 @@ private:
                 if (std::optional<game::OnlineCar> oc = game::decode_online_car(*info)) {
                     car = oc->name.empty() ? oc->car : oc->name;
                     if (oc->kind == game::OnlineCar::Kind::Garage) car = "Garage: " + car;
-                    if (oc->kind == game::OnlineCar::Kind::Mod) car += db_.car(oc->car) ? " (mod)" : " (mod, not installed)";
+                    if (game::online_car_is_mod(*oc)) car += db_.car(oc->car) ? " (mod)" : " (mod, not installed)";
                     if (oc->kind == game::OnlineCar::Kind::Arcade)
                         if (int k = gd ? game::arcade_class_of(*gd, oc->arcade) : 0)
                             car = std::string(game::arcade_class_name(k)) + ": " + car;
@@ -1300,6 +1337,8 @@ private:
             if (!pal.empty()) draw_paint_chip(ui, arrows ? 212 : 200, ry - 1, 18, 9, pal[size_t(cur)].rgb, false);
         }
         row(kGearbox, "Transmission", manual_ ? "Manual" : "Automatic", true, true);
+        row(kAsm, "Stability control (ASM)", asm_on_ ? "On" : "Off", true, true);
+        row(kTcs, "Traction control (TCS)", tcs_on_ ? "On" : "Off", true, true);
         // "Relay busy: 2nd in line, about 3 min" while the race waits for the relay's link slots.
         std::string wait = net::relay_wait_text(ns.relay_wait());
         const std::string not_here = ns.joined() ? remote_car_problem(ns) : "";
@@ -1509,7 +1548,9 @@ private:
         l.paint = oc.paint;
         l.car_info = game::encode_online_car(oc);
         l.manual = manual_;
-        LOG_INFO("Online: race on %s, %d laps, %zu cars", l.course.c_str(), l.laps, e.grid.size());
+        l.asm_on = asm_on_, l.tcs_on = tcs_on_;
+        LOG_INFO("Online: race on %s, %d laps, %zu cars, ASM %s, TCS %s", l.course.c_str(), l.laps, e.grid.size(),
+                 l.asm_on ? "on" : "off", l.tcs_on ? "on" : "off");
         in_race_ = true;
         page_ = Page::Lobby; // a picker or the rules page left open closes for the race
         app.push(make_online_race_screen(l));
@@ -1594,7 +1635,7 @@ private:
     race::CarColors colors_;
     std::vector<Entry> cars_;
     mutable std::vector<std::optional<game::CarFacts>> facts_; // per cars_ entry, built on use
-    mutable std::map<Bytes, game::CarHere> here_;              // other players' cars, by descriptor
+    mutable std::map<Bytes, Here> here_;                       // other players' cars, by descriptor
     std::vector<PickerCourse> courses_;
     PickerArt art_;
     CarPicker car_picker_;
@@ -1607,6 +1648,7 @@ private:
     u16 port_ = net::kDefaultPort;
     int car_sel_ = 0, course_sel_ = 0, laps_ = 2, paint_ = 0;
     bool manual_ = false;
+    bool asm_on_ = true, tcs_on_ = true; // the game's Options ASM / TCS
     struct OwnPackage {
         std::string hash; // empty: the car cannot be shared
         u32 size = 0;

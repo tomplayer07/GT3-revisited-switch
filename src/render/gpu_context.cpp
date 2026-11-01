@@ -49,6 +49,102 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, const GpuOpti
 #endif
 }
 
+bool GpuContext::open_sdl_gpu(SDL_Window* window, const GpuOptions& options) {
+#if GT3R_HAVE_GPU_RENDERER
+    // Ask only for the optional Vulkan features the renderer uses. SDL requests clip distances,
+    // depth clamping and first-instance indirect draws by default, and rejects every GPU without
+    // them, e.g. Mali (Pixel, Galaxy, Tensor phones), which lacks shaderClipDistance. We clip
+    // depth normally, draw directly and write no clip distances. Anisotropic filtering is the one
+    // we use: a GPU without it gets a second try with it off (anisotropy_ = false).
+#if GT3R_XR
+    // A headset: one attempt through its OpenXR runtime (the Quest runtime cannot be set up a
+    // second time in a process), with the same features as below.
+    if (options.xr) {
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, options.debug);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, true);
+        if (xr::Session::prepare_device(props, xr_request_)) {
+            device_ = SDL_CreateGPUDeviceWithProperties(props);
+            if (device_) xr_ = true;
+            else LOG_INFO("VR: no headset (%s); using the window", SDL_GetError());
+        }
+        SDL_DestroyProperties(props);
+    }
+    for (bool aniso : {true, false}) {
+        if (device_) break;
+#else
+    for (bool aniso : {true, false}) {
+#endif
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN, true);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, options.debug);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, aniso);
+        device_ = SDL_CreateGPUDeviceWithProperties(props);
+        SDL_DestroyProperties(props);
+        if (device_) {
+            anisotropy_ = aniso;
+            if (!aniso) LOG_INFO("3D renderer: anisotropic filtering unavailable on this GPU");
+            break;
+        }
+    }
+    if (!device_) {
+        LOG_WARN("No SDL_GPU device: %s", SDL_GetError());
+        return false;
+    }
+    const SDL_PropertiesID device_props = SDL_GetGPUDeviceProperties(device_);
+    const char* gpu_name = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_NAME_STRING, "");
+    const char* driver = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_DRIVER_INFO_STRING, nullptr);
+    if (!driver) driver = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_DRIVER_VERSION_STRING, "");
+    LOG_INFO("3D renderer: GPU %s%s%s", gpu_name, *driver ? ", driver " : "", driver);
+    // The 2D renderer claims the window and owns the swapchain (a headset: offscreen, it draws
+    // into the session's canvases and the headset sets the pace).
+    SDL_Window* target = window;
+#if GT3R_XR
+    if (xr_) target = nullptr;
+#endif
+    renderer_ = SDL_CreateGPURenderer(device_, target);
+    if (!renderer_) {
+        LOG_WARN("SDL_CreateGPURenderer failed: %s", SDL_GetError());
+        SDL_DestroyGPUDevice(device_);
+        device_ = nullptr;
+        return false;
+    }
+    return true;
+#else
+    (void)window;
+    (void)options;
+    return false;
+#endif
+}
+
+// The OpenGL ES device (gpu_gles.h): its renderer is SDL's GLES2 one, with the context.
+bool GpuContext::open_gles(SDL_Window* window, const GpuOptions& options) {
+#if GT3R_GLES
+    device_ = gles::create_device(options.debug, options.angle);
+    renderer_ = SDL_CreateGPURenderer(device_, window);
+    if (!renderer_) {
+        LOG_WARN("No OpenGL ES renderer: %s", SDL_GetError());
+        SDL_DestroyGPUDevice(device_);
+        device_ = nullptr;
+        return false;
+    }
+    gles_ = true;
+    return true;
+#else
+    (void)window;
+    (void)options;
+    return false;
+#endif
+}
+
 bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
 #if defined(__SWITCH__)
     renderer_ = SDL_CreateRenderer(window, nullptr);
@@ -189,71 +285,18 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
     LOG_INFO("3D renderer: Native Switch OpenGL ES 3.0 initialized!");
     return true;
 #elif GT3R_HAVE_GPU_RENDERER
-    // Ask only for the optional Vulkan features the renderer uses. SDL requests clip distances,
-    // depth clamping and first-instance indirect draws by default, and rejects every GPU without
-    // them, e.g. Mali (Pixel, Galaxy, Tensor phones), which lacks shaderClipDistance. We clip
-    // depth normally, draw directly and write no clip distances. Anisotropic filtering is the one
-    // we use: a GPU without it gets a second try with it off (anisotropy_ = false).
-#if GT3R_XR
-    // A headset: one attempt through its OpenXR runtime (the Quest runtime cannot be set up a
-    // second time in a process), with the same features as below.
-    if (options.xr) {
-        SDL_PropertiesID props = SDL_CreateProperties();
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, options.debug);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, true);
-        if (xr::Session::prepare_device(props, xr_request_)) {
-            device_ = SDL_CreateGPUDeviceWithProperties(props);
-            if (device_) xr_ = true;
-            else LOG_INFO("VR: no headset (%s); using the window", SDL_GetError());
-        }
-        SDL_DestroyProperties(props);
-    }
-    for (bool aniso : {true, false}) {
-        if (device_) break;
-#else
-    for (bool aniso : {true, false}) {
+    // SDL_GPU first, OpenGL ES when it has no backend for this GPU; [video] gpu = gles turns
+    // the order round.
+    bool open = false;
+#if GT3R_GLES
+    if (options.gles) open = open_gles(window, options);
 #endif
-        SDL_PropertiesID props = SDL_CreateProperties();
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN, true);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, options.debug);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
-        SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, aniso);
-        device_ = SDL_CreateGPUDeviceWithProperties(props);
-        SDL_DestroyProperties(props);
-        if (device_) {
-            anisotropy_ = aniso;
-            if (!aniso) LOG_INFO("3D renderer: anisotropic filtering unavailable on this GPU");
-            break;
-        }
-    }
-    if (!device_) {
-        LOG_WARN("No SDL_GPU device: %s", SDL_GetError());
-        return false;
-    }
-    const SDL_PropertiesID device_props = SDL_GetGPUDeviceProperties(device_);
-    const char* gpu_name = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_NAME_STRING, "");
-    const char* driver = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_DRIVER_INFO_STRING, nullptr);
-    if (!driver) driver = SDL_GetStringProperty(device_props, SDL_PROP_GPU_DEVICE_DRIVER_VERSION_STRING, "");
-    LOG_INFO("3D renderer: GPU %s%s%s", gpu_name, *driver ? ", driver " : "", driver);
-    // The 2D renderer claims the window and owns the swapchain (a headset: offscreen, it draws
-    // into the session's canvases and the headset sets the pace).
-    SDL_Window* target = window;
-#if GT3R_XR
-    if (xr_) target = nullptr;
+    if (!open) open = open_sdl_gpu(window, options);
+#if GT3R_GLES
+    if (!open && !options.gles) open = open_gles(window, options);
 #endif
-    renderer_ = SDL_CreateGPURenderer(device_, target);
-    if (!renderer_) {
-        LOG_WARN("SDL_CreateGPURenderer failed: %s", SDL_GetError());
-        return false;
-    }
-    if (target) SDL_SetRenderVSync(renderer_, options.vsync ? 1 : 0);
+    if (!open) return false;
+    if (renderer_ && SDL_GetRenderWindow(renderer_)) SDL_SetRenderVSync(renderer_, options.vsync ? 1 : 0);
 
     vs_ = make_shader(true);
     fs_ = make_shader(false);
@@ -275,8 +318,9 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
     white_ = up.texture_rgba(1, 1, &white, false);
     if (!white_ || !up.submit()) return false;
 
-    LOG_INFO("3D renderer: SDL_GPU %s, MSAA %dx, anisotropy %dx, depth format %d, render scale %.2f", driver_name(),
-             msaa(), anisotropy(), int(depth_format_), double(render_scale_));
+    LOG_INFO("3D renderer: %s%s, MSAA %dx, anisotropy %dx, depth format %d, render scale %.2f",
+             gles_ ? "OpenGL ES" : "SDL_GPU ", gles_ ? "" : driver_name(), msaa(), anisotropy(), int(depth_format_),
+             double(render_scale_));
     return true;
 #else
     (void)window;
@@ -316,6 +360,23 @@ GpuContext::~GpuContext() {
 SDL_GPUShader* GpuContext::make_shader(bool vertex) {
     SDL_GPUShaderCreateInfo info{};
     SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device_);
+    SDL_PropertiesID props = 0;
+#if GT3R_GLES
+    if (formats & SDL_GPU_SHADERFORMAT_PRIVATE) {
+        // OpenGL ES (gpu_gles.h): GLSL ES source, with its block and sampler names.
+        props = SDL_CreateProperties();
+        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_UNIFORM_BLOCKS,
+                              vertex ? shaders::model_vert_gles_blocks : shaders::model_frag_gles_blocks);
+        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_SAMPLERS,
+                              vertex ? shaders::model_vert_gles_samplers : shaders::model_frag_gles_samplers);
+        info.props = props;
+        info.format = SDL_GPU_SHADERFORMAT_PRIVATE;
+        const char* src = vertex ? shaders::model_vert_gles : shaders::model_frag_gles;
+        info.code = reinterpret_cast<const Uint8*>(src);
+        info.code_size = std::strlen(src);
+        info.entrypoint = "main";
+    } else
+#endif
     if (formats & SDL_GPU_SHADERFORMAT_SPIRV) {
         info.format = SDL_GPU_SHADERFORMAT_SPIRV;
         info.code = vertex ? shaders::model_vert_spv : shaders::model_frag_spv;
@@ -336,6 +397,7 @@ SDL_GPUShader* GpuContext::make_shader(bool vertex) {
     info.num_uniform_buffers = vertex ? 2 : 1; // vertex: transforms, GT3 per-vertex lighting
     SDL_GPUShader* s = SDL_CreateGPUShader(device_, &info);
     if (!s) LOG_WARN("Shader creation failed: %s", SDL_GetError());
+    if (props) SDL_DestroyProperties(props);
     return s;
 }
 
@@ -475,7 +537,7 @@ std::vector<PipelineKey> warm_keys() {
 } // namespace
 
 void GpuContext::warm_pipelines() {
-    if (!device_) return; // The Switch GLES backend has no SDL_GPU pipelines.
+    if (!device_ || gles_) return;
     stop_warming();
     warm_ = true;
     warm_stop_ = false;

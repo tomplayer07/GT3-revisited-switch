@@ -65,10 +65,14 @@ input differs (§4.4).
 | step | 1/60 s | §1.1 |
 
 **Arithmetic.** Every value of the step is a PS2 single-precision float, computed in the
-game's own order of operations: additions, subtractions and multiplications round
-towards zero, an addition drops the smaller operand's bits beyond one guard bit,
-divisions and square roots round to nearest, there are no denormals (they read as 0) and
-no infinities or NaNs (an overflow saturates at the largest value). Where the game computes
+game's own order of operations: additions and subtractions round towards zero, and an
+addition drops the smaller operand's bits beyond one guard bit; a multiplication gives the
+EE multiplier's result, the product rounded towards zero or now and then one below it (the
+multiplier loses a carry from its lowest columns); divisions and square roots give the EE
+divider's, the result rounded towards zero or one above it but never above an exact one (a
+digit recurrence that is never corrected). There are no denormals (they read as 0) and no
+infinities or NaNs (an overflow saturates at the largest value; a multiply-add whose
+product overflows gives that product). Where the game computes
 in double precision (a few steps of the car's parameter build, the wear grip and the AI's
 speed planning), it uses
 its own software doubles, and so does GT3 Revisited. Sines, cosines and arctangents are
@@ -1117,8 +1121,9 @@ gain_D = p20 × 0.01, gain_C = p21 × 0.01, threshold_C = p22 × 0.01, gain_E = 
 Every built-in set gives TCS 6.0 / 1.0 / 0 / 1.0 and enable bits 0 (no ASCC); a course's own
 set with non-zero bits turns the channels on.
 
-**The Options menu's ASM / TCS.** In arcade single races, free runs and two-player battles
-(both players' cars) the race applies the two switches when it builds the car; other modes
+**The Options menu's ASM / TCS.** In arcade single races, free runs, two-player battles
+(both players' cars) and online battles the race applies the two switches when it builds the
+car (an online lobby sets the same two); other modes
 always keep the aids; a saved replay keeps those of its run and a demonstration those of its
 recording. ASM off clears the ASCC
 enable bits, so no channel acts; TCS off sets the TCS gain to 0. ABS and the AI's aid block
@@ -1342,14 +1347,19 @@ Where a car's equipment comes from:
 
 - a GT Mode garage car (also a replay's car and an online player's garage car): its parts and
   the player's settings, as they are;
-- an opponent or prize car (a car variant, table 31): the base car's parts with the variant's
-  non-zero part slots, and the stock settings of those parts clamped into each part's ranges
-  (§6.6);
-- an arcade car (table 35): its parts and clamped stock settings, then the record's own
-  settings bytes (+0xE8 to +0x10D: final drive, gearbox slider, LSD, downforce, dampers,
-  camber, toe, anti-roll bars, ride heights, springs, TCS, ASCC and an engine output
-  override); the arcade car page's tire choice swaps both tire parts;
+- an event's car (a car variant, table 31: every opponent, a license test's car) or an arcade
+  car (table 35): the record's parts with the stock settings of those parts clamped into each
+  part's ranges (§6.6), then the record's own settings bytes (+0xE8 to +0x10D: final drive,
+  gearbox slider, LSD, downforce, dampers, camber, toe, anti-roll bars, ride heights, springs,
+  TCS, ASCC and an engine output override, §6.2); the arcade car page's tire choice swaps both
+  tire parts;
 - any other database car: its own parts with clamped stock settings.
+
+**Tires for the course.** Before every race, in every mode, each car's tires are fitted to the
+course: on a dirt course (course category 2) both become the car's dirt tires (stage 12), on a
+wet course (category 1) the wet set of the front tire's stage (stage + 13). A car already on
+such tires keeps them, and so does a car without both records of that stage. Replays and
+ghosts race on the tires they were recorded with.
 
 An electric mod car races on its donor car's stock engine, engine parts, drivetrain and
 gearbox: the race has no electric drive yet.
@@ -1418,8 +1428,8 @@ Port polish runs twice, so its factor applies squared (102 % gives
 
 The torque curve (§2.1) is built from the engine record's points (count +0x57, rpm bytes
 +0x47 onwards × 100, torque words +0x18 onwards in 0.01 kgf·m) with three scales: the output
-factor (engine +0x42 × 10 per mille; an arcade car's settings word 0x1B8 replaces it when
-non-zero), Q at the curve's first point and P at its last, interpolated linearly in engine
+factor (engine +0x42 × 10 per mille; an event or arcade car's settings word 0x1B8 replaces it
+when non-zero), Q at the curve's first point and P at its last, interpolated linearly in engine
 speed between them. A P, Q or output factor of 0 counts as 100 %. A last torque word of 0
 takes the previous point's value. With a turbo, each point is multiplied by
 min(B, 1 + cap) / B, B the uncapped boost at the point's rpm (§2.3).
@@ -1647,7 +1657,7 @@ are taken as they are. GT Mode's Settings pages edit a copy of a garage car's wo
 | 0x18C / 0x190 | anti-roll bar index | suspension +0x4A / +0x4E | gain = §6.1 value × 98 N/m² |
 | 0x194..0x1A8 | LSD initial front, rear; accel front, rear; decel front, rear | LSD +0x12, +0x1C, +0x15, +0x1F, +0x18, +0x22 | by type (§6.2) |
 | 0x1B0 | TCS index | TCSC +0x11 | see below |
-| 0x1B8 | engine output override (arcade cars) | none (0) | replaces the output factor when non-zero (§6.2) |
+| 0x1B8 | engine output override (event and arcade cars: the record's u16 +0x10A) | none (0) | replaces the output factor when non-zero (§6.2) |
 | 0x1BC..0x1C8 | ASCC indices A, D, C, E | ASCC +0x12, +0x1B, +0x21, +0x26 | see below |
 
 The **front** rebound stages reuse the front bound indices (0x16C for stage 1, 0x170 for
