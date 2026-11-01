@@ -1719,6 +1719,11 @@ void View3D::encode_gles3(const Mat4& view, const Mat4& proj, const Vec3& eye,
             }
 
             int desired_depth_mask = (!(p.flags & scene::kNoDepthWrite) && !v.item->background) ? 1 : 0;
+            // Alpha-blended car decals cover broad meshes with transparent texels. Keep their
+            // depth test so they stay attached to the body, but do not let those texels occlude
+            // later body pieces in the native packet-order encoder.
+            if (v.item->car_surface && (p.flags & scene::kAlphaBlend))
+                desired_depth_mask = 0;
             GLuint tex = ctx_.gl_white();
             int clamp_mode = 0;
             bool textured = false;

@@ -634,3 +634,9 @@ Switch encoder retains its existing submission logic. Course-file sharing and
 the new physics arithmetic are common code. Console performance and visual
 regressions require a hardware comparison with the previous build and the same
 configuration, especially on night courses.
+
+On Switch, alpha-blended car decals retain depth testing but disable depth writes.
+Their transparent texels otherwise wrote depth in model packet order and could
+occlude later body pieces, producing dark rectangular patches around the 787B's
+logos. The change was confirmed on console with decals, reflections, specular
+layers and mipmaps enabled.

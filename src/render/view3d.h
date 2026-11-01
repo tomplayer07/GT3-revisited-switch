@@ -211,6 +211,8 @@ struct DrawItem {
     // Double-sided primitives culled like the rest (back faces): a car body seen from inside
     // (VR's in-car view) shows its bonnet, not the inside of its roof and windows.
     bool single_sided = false;
+    // Marks car body packets so transparent alpha decals do not write occluding depth.
+    bool car_surface = false;
 };
 
 class View3D {

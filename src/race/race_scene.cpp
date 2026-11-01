@@ -512,6 +512,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
                                int lod) const {
     render::Mat4 world = pre * car_matrix(s);
     auto styled = [&](render::DrawItem it) {
+        it.car_surface = true;
         for (int k = 0; k < 3; ++k) it.light_scale[k] = look.light_scale[k];
         it.reflection_scale = look.reflection;
         it.lamp = look.lamp;
