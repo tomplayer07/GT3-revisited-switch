@@ -511,8 +511,8 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
                                const sim::VehicleSetup& setup, const CarLook& look, const render::Mat4& pre,
                                int lod) const {
     render::Mat4 world = pre * car_matrix(s);
-    auto styled = [&](render::DrawItem it) {
-        it.car_surface = true;
+    auto styled = [&](render::DrawItem it, bool body_surface = false) {
+        it.car_surface = body_surface;
         for (int k = 0; k < 3; ++k) it.light_scale[k] = look.light_scale[k];
         it.reflection_scale = look.reflection;
         it.lamp = look.lamp;
@@ -520,7 +520,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
         return it;
     };
     const render::GpuModel* body = look.brake_now && body_brake_ ? body_brake_.get() : body_.get();
-    items.push_back(styled({body, world * render::translate({0, body_lift(setup), 0}), lod}));
+    items.push_back(styled({body, world * render::translate({0, body_lift(setup), 0}), lod}, true));
     if (morph_base_) {
         Morph& mo = morph_[size_t(std::clamp(look.instance, 0, int(morph_.size()) - 1))];
         const std::array<float, 5> v = car_callback_values(s, setup);
@@ -535,7 +535,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
             mo.gpu->update_geometry(meshes);
             mo.values = v;
         }
-        items.push_back(styled({mo.gpu.get(), world * render::translate({0, body_lift(setup), 0}), lod}));
+        items.push_back(styled({mo.gpu.get(), world * render::translate({0, body_lift(setup), 0}), lod}, true));
     }
     for (int i = 0; i < 4; ++i) {
         if (!wheels_[size_t(i)]) continue;

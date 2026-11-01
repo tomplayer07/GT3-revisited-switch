@@ -418,6 +418,14 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
     std::vector<SDL_Vertex> verts;
     std::vector<int> idx;
     int kept = 0;
+    struct BodyBlocker {
+        const Occluder* body = nullptr;
+        render::Mat4 world_to_local;
+    };
+    std::vector<BodyBlocker> body_blockers;
+    body_blockers.reserve(cars.size());
+    for (const Car& car : cars)
+        if (car.body && !car.body->empty()) body_blockers.push_back({car.body, render::inverse(car.model)});
     // `glow`: head and brake lamps (tail lamps only ever get the halo); `I` the brake factor.
     auto lamp = [&](const Car& car, const CarLampRecord& l, bool glow, float I, const Blocked& occluded) {
 #if defined(__SWITCH__)
@@ -499,11 +507,13 @@ void CarLampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Ma
     };
     for (const Car& car : cars) {
         if (!car.lamps) continue;
-        const render::Mat4 local = render::inverse(car.model);
-        const render::Vec3 local_eye = local.transform_point(eye);
         const Blocked occluded = [&](const render::Vec3& from, const render::Vec3& to) {
-            return blocked(from, to) || (car.body && !car.body->empty() &&
-                   car.body->segment_blocked(local_eye, local.transform_point(to)));
+            if (blocked(from, to)) return true;
+            for (const BodyBlocker& blocker : body_blockers)
+                if (blocker.body->segment_blocked(blocker.world_to_local.transform_point(from),
+                                                  blocker.world_to_local.transform_point(to)))
+                    return true;
+            return false;
         };
         for (const CarLampRecord& l : car.lamps->head) lamp(car, l, true, 1.0f, occluded);
         if (car.k > 0)
