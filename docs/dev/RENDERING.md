@@ -87,6 +87,8 @@ game with a message.
 | `limit_60fps` | | off | `on` (Settings → Display → Limit to 60 fps): on 120 Hz and faster displays draw every Nth refresh (120 Hz → 60 fps, 144 → 72) through SDL's main loop rate (`App::apply_frame_limit`); off: every refresh |
 | `show_fps` | | off | `on` (Settings → Display → FPS counter): the frames drawn per second, averaged over about half a second, at the top left of the window over everything; on our own screens (`Screen::adaptive_ui`), whose header runs along the top, at the bottom right (`App::draw_fps`). In the safe area on phones, on the virtual screen in VR |
 | `full_car_detail` | | on (desktop), off (Android, iOS) | Settings → Display → Always show full car detail: every car at LOD 0 at any distance (`race::car_lod`, `App::full_car_detail`); off: GT3's LODs by distance. On a Galaxy A15 (Trial Mountain, 6 cars) on drew 32% more triangles and 25% more draw calls: +1.4 ms a frame at a fixed 70% scale with `gpusync=1` (+0.7 ms of it CPU), and in normal play about 1.5 points less dynamic resolution at the same 45 fps |
+| `showroom_wheels` | | on (desktop), off (Android, iOS) | Settings → Display → Showroom wheels in races: race cars' LOD 0 wheels are the menus' (`menu/cars` rim and 256x128 tyre texture, a fitted wheel's `menu/wheel/<label>`, 30-segment tyres; `CarModelOptions::showroom_car`, `App::showroom_wheels`); the race rims while a wheel turns past 3 degrees a frame, for GT3's rim blur ([RACE](RACE.md)); off: GT3's race wheels. About 5,200 more triangles a car at LOD 0 (median rim 1,413 triangles against 112), and each car reads its `menu/cars` file when the race loads |
+| `heat_haze` | | off | `on` (Settings → Display → Heat haze in replays): the replays' heat haze lenses (`race::HeatHaze`, `DrawOptions::haze`; [RACE](RACE.md#passes-after-the-3d-picture)). Off by default: in a sharp picture the lenses, sliding across panning shots and jumping where they wrap, read as jitter rather than GT3's soft shimmer |
 | `gpu_debug` | | 0 | Backend validation layers (OpenGL ES: GL error checks kept) |
 | `anisotropy` | | 4 | 1 (off), 2, 4, 8 or 16: the mipmapped samplers' anisotropy (not the `no_mips` ones). A GPU without anisotropic filtering gets none (`GpuContext::anisotropy_supported`) |
 | `render_scale` | `--render-scale X` | auto | 0.5..4.0: 3D views render at this fraction of their on-screen pixel size and are scaled (linear) when composited; UI and HUD stay native. `auto` = 1.0 on desktop; on Android/iOS about 900 lines of the 16:9 game area (e.g. 0.63 on a 2560×1600 tablet, 0.70 on a 2856×1280 phone). Above 1 (supersampling) within `platform::supersample_limit`: 16384 pixels a side per view, the largest 2D texture SDL_GPU assumes (400% up to 4096 pixels across, 320% of 5120×2880); no memory cap, and like any 3D resolution it costs frame rate unless dynamic resolution is on. Supersampled targets are not cycled: SDL keeps a cycled target once per frame in flight, and 400% of 3840×2160 with 4x MSAA then took over 20 GB, which SDL's Vulkan backend put in system memory (it only warns, once per device) on a 10 GB RTX 3080: about a frame a second. Uncycled (about 5 GB), the 3080 draws it in 29.9 ms a frame, 10.3 ms with MSAA off; an M4 Pro draws 400% of 2560×1440 at 48–55 fps (42–46 cycled). A picture over twice the on-screen size is halved first by a linear `SDL_BlitGPUTexture` (each pixel a 2×2 mean), so the composite's linear filter misses no texel. A view whose supersampled targets cannot be created steps down to 75% of that size per failed frame, at most to native. See `src/platform/render_scale.*` |
@@ -168,7 +170,7 @@ builds with `GT3R_GLES` (Windows and Linux by default) include it.
   OpenGL ES (driver) (`[video] gpu = gles_driver`, `--gles-driver`) asks for the
   driver's instead; SDL still uses ANGLE for a driver without OpenGL ES 3.0
   contexts. `SDL_OPENGL_ES_DRIVER=0` or `1` in the environment overrides both. Release packages ship it: CI builds
-  ANGLE with vcpkg's `angle` port, and `-DGT3R_ANGLE_DIR=<folder>` copies a
+  ANGLE with vcpkg's `angle` port (`packaging/angle.ps1`, kept in CI's cache), and `-DGT3R_ANGLE_DIR=<folder>` copies a
   build next to the game and into the package. Without ANGLE, NVIDIA and AMD
   drivers offer OpenGL ES 3.0 contexts themselves (NVIDIA from GeForce 400 on);
   older Intel ones do not.
@@ -228,6 +230,7 @@ There is one shader pair. Per-primitive state comes from
 | `kAlphaBlend \| kAlphaTest \| kAlphaFailBlend` | GS AFAIL = RGB_ONLY (course foliage): drawn twice, the fragments passing the test in the opaque phase (with depth write), the failing ones blended in the blended phase without depth write |
 | `kDoubleSided` | no culling; normals flipped for back faces |
 | `kUnlit` | colour = texture × vertex colour, no lighting |
+| `kVertexColor2x` | the vertex RGB are the GS bytes (0x80 = 128): `model.vert` scales them by 255/128 (GTM1 packets with a colour factor past 0x80; texel × colour >> 7 as on the GS) |
 | `kEnvironmentMap` | placeholder reflection: sky/ground gradient mixed by `env_strength` |
 | `kNoDepthWrite` | depth write off (the depth test stays on, GREATER_OR_EQUAL as for every pass) |
 | `kAdditive \| kDestAlphaAdd` | GS ALPHA 0x58 (Cs·Ad + Cd): with `DrawItem::frame_alpha`, added weighted by the frame-buffer alpha (`BlendMode::DestAlphaAdd`); elsewhere plain additive (src·α + dst). The course road sheen and other blended ALPHA 0x58 course packets |
@@ -256,6 +259,10 @@ to three more (`fill_*`, or `ItemLights` per item). Vertex colour is used
 as-is (RGBA8 → 0..1). Decoders should map PS2's 0x80 = 1.0 convention
 themselves (the GTM1 decoder does for colours that modulate a texture or feed the
 lighting; a pre-lit untextured colour stays as the GS shows it, 0x80 = mid grey).
+A factor can pass 1.0 (up to 0xFF = 255/128: the GS's MODULATE is texel × colour >> 7,
+clamped to 255), which RGBA8 at 0x80 = 255 cannot hold: packets with a colour past 0x80
+keep the GS bytes and carry `kVertexColor2x` (Trial Mountain's scenery: 31% of its pre-lit
+channels are 0x90-0xBF; other US courses about 1-2%).
 
 ### GT3 lighting (primitives with a valid `scene::Material`)
 
@@ -362,6 +369,9 @@ uses a slightly depth-biased projection, so it works without
 | `fog`, `fog_color/start/end/max` | linear distance fog (not on background or helper items); `fog_gt3`: GT3's per-vertex depth fog (see "GT3 lighting") |
 | `blend_alpha_ref` | alpha-test threshold for blended `kAlphaTest` primitives |
 | `post_grade`; `snapshot`, `dissolve`, `trail` | full-screen passes over the finished picture, as GT3's before its 2D layer: the colour grade (levels, a curve per channel, saturation, in GT3's 8-bit table arithmetic; `post_grade_pixel` is the same on the CPU) and, in replays, a dissolve from a frozen picture and a trail of the last one |
+| `dof` | GT3's replay depth of field, before those passes: the scene pass keeps its depth; five small single-sample pictures (`PipelineKey::single`, model.frag mode 6) downsampled from the picture, then a pass over the (multisampled) target draws the layers of `dof_layers` as quads at their depth, tested GEQUAL against the scene's depth. The OpenGL ES backend keeps the depth between the passes (a stored depth is not invalidated) |
+| `haze`; `overlay`; `vignette` | `render::ScreenBatch` triangles in their own rectangle's units, in GT3's order after the scene and `dof` ([RACE](RACE.md#passes-after-the-3d-picture)): `haze` samples a copy of the picture (the scene pass, or the depth of field's last pass, then stores its picture and depth, and a second pass draws the haze, the `DrawItem::late` items and the overlay; depth-of-field frames get that pass too), `overlay` is added before the grade (sun glare, lamp glows), `vignette` is blended over the graded picture before the dissolve and the trail. Uploaded once per draw (one vertex and index buffer); the model shader's unlit and post modes, no shader of their own |
+| `DrawItem::late` | drawn after every other item of the pass, with the scene's depth (the tyre smoke) |
 
 `DrawItem::background` draws an item first, without depth writes, culling or
 fog (sky domes; pass `translate(eye)` as the transform). `DrawItem::in_order`

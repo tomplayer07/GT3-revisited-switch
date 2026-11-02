@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 namespace gt3r {
@@ -27,6 +29,20 @@ float normalize_axis(Sint16 v) { return std::clamp(static_cast<float>(v) / kAxis
 
 std::string section_name(int player, const char* suffix = "") {
     return "player" + std::to_string(player + 1) + suffix;
+}
+
+float parse_curve(const std::optional<std::string>& v) {
+    if (!v) return 1.0f;
+    char* end = nullptr;
+    const float f = std::strtof(v->c_str(), &end);
+    return end == v->c_str() ? 1.0f
+                             : std::clamp(f, InputManager::kSteeringCurveMin, InputManager::kSteeringCurveMax);
+}
+
+std::string format_curve(float v) {
+    char b[16];
+    std::snprintf(b, sizeof(b), "%.2f", double(v));
+    return b;
 }
 
 bool contains_ci(const std::string& hay, const std::string& needle) {
@@ -110,6 +126,8 @@ void InputManager::load(const IniDocument& cfg) {
         if (auto kb = cfg.get(sec, "keyboard")) p.keyboard = to_lower(*kb) == "on" || *kb == "1";
         if (i == 0) set_phone_vibration(to_lower(cfg.get(sec, "phone_vibration").value_or("off")) == "on");
         p.rumble_mode = to_lower(cfg.get(sec, "rumble").value_or("auto"));
+        p.steering_curve = parse_curve(cfg.get(sec, "steering_curve"));
+        p.wheel_steering_curve = parse_curve(cfg.get(sec, "wheel_steering_curve"));
     }
     set_background(to_lower(cfg.get("input", "background").value_or("off")) == "on");
     assign_devices();
@@ -130,6 +148,8 @@ void InputManager::save(IniDocument& cfg) const {
         cfg.set(sec, "keyboard", p.keyboard ? "on" : "off");
         if (i == 0) cfg.set(sec, "phone_vibration", phone_vibration_ ? "on" : "off");
         cfg.set(sec, "rumble", p.rumble_mode);
+        cfg.set(sec, "steering_curve", format_curve(p.steering_curve));
+        cfg.set(sec, "wheel_steering_curve", format_curve(p.wheel_steering_curve));
         cfg.set(sec, "race", p.bindings.race_layout);
         p.bindings.save(cfg, sec);
         p.actions.save(cfg, sec);
@@ -172,9 +192,15 @@ void InputManager::reset_bindings(int player) {
     refresh(p);
 }
 
-bool InputManager::bind(int player, const PadTarget& target, const InputSource& source, bool replace) {
+bool InputManager::wheel_source(const Player& p, const InputSource& source) const {
+    if (source.kind != InputSource::Kind::JoyAxis) return false;
+    const Device* d = source.device.empty() ? find_device(p.device) : find_tagged(source.device, p.device);
+    return d && !d->gamepad && d->wheel;
+}
+
+bool InputManager::bind(int player, const PadTarget& target, const InputSource& source, bool replace, float rest) {
     Player& p = players_[player];
-    if (!p.bindings.bind(p.kind, false, target, source, replace)) return false;
+    if (!p.bindings.bind(p.kind, false, target, source, replace, {wheel_source(p, source), rest})) return false;
     if (source.device.empty()) refresh(p);
     else assign_devices(); // the other player's Auto can't keep the device this binding names
     return true;
@@ -197,9 +223,10 @@ const Profile& InputManager::race_profile(int player) const {
     return p.race_reads_menu ? p.menu : p.race;
 }
 
-bool InputManager::bind_race(int player, const PadTarget& target, const InputSource& source, bool replace) {
+bool InputManager::bind_race(int player, const PadTarget& target, const InputSource& source, bool replace,
+                             float rest) {
     Player& p = players_[player];
-    if (!p.bindings.bind(p.kind, true, target, source, replace)) return false;
+    if (!p.bindings.bind(p.kind, true, target, source, replace, {wheel_source(p, source), rest})) return false;
     if (source.device.empty()) refresh(p);
     else assign_devices(); // the other player's Auto can't keep the device this binding names
     return true;
@@ -358,9 +385,20 @@ const InputManager::Device* InputManager::tagged_steering(const Player& p) const
     return nullptr;
 }
 
-bool InputManager::wheel_steering(int player) const {
-    const Player& p = players_[player];
+bool InputManager::wheel_steering(int player) const { return wheel_steering(players_[player]); }
+
+bool InputManager::wheel_steering(const Player& p) const {
     return tagged_steering(p) != nullptr || p.kind == DeviceKind::Wheel;
+}
+
+float InputManager::steering_curve(const Player& p) const {
+    return wheel_steering(p) ? p.wheel_steering_curve : p.steering_curve;
+}
+
+void InputManager::set_steering_curve(int player, float curve) {
+    Player& p = players_[player];
+    curve = std::clamp(std::round(curve * 100.0f) / 100.0f, kSteeringCurveMin, kSteeringCurveMax);
+    (wheel_steering(p) ? p.wheel_steering_curve : p.steering_curve) = curve;
 }
 
 std::string InputManager::describe(int player, const InputSource& src) const {
@@ -553,6 +591,7 @@ void InputManager::begin_capture(int player) {
     chord_inputs_.clear();
     captured_chord_.reset();
     captured_.reset();
+    captured_rest_ = 0.0f;
     // Record resting positions so pedals that rest at +/-1 and slightly
     // off-center sticks don't register as input.
     capture_baseline_.clear();
@@ -568,8 +607,9 @@ void InputManager::begin_capture(int player) {
     }
 }
 
-std::optional<InputSource> InputManager::poll_capture() {
-    auto out = captured_;
+std::optional<InputManager::CapturedInput> InputManager::poll_capture() {
+    if (!captured_) return std::nullopt;
+    CapturedInput out{*captured_, captured_rest_};
     captured_.reset();
     return out;
 }
@@ -637,6 +677,12 @@ void InputManager::evaluate(Player& p, double dt) {
     evaluate_profile(p, dev, keyboard, p.menu, p.ramp_values, p.state, dt);
     if (p.race_reads_menu) p.race_state = p.state;
     else evaluate_profile(p, dev, keyboard, p.race, p.race_ramps, p.race_state, dt);
+    // The steering curve: the race's steering only (the menus read the stick as it is).
+    if (p.steering_curve != 1.0f || p.wheel_steering_curve != 1.0f)
+        if (const float c = steering_curve(p); c != 1.0f) {
+            const float x = p.race_state.axis_fine(PadAxis::LX);
+            p.race_state.set_axis(PadAxis::LX, std::copysign(std::pow(std::fabs(x), c), x));
+        }
 }
 
 void InputManager::evaluate_any_device(double dt) {
@@ -716,7 +762,7 @@ void InputManager::evaluate_profile(const Player& p, const Device* dev, bool key
             button_digital[i] = true;
             button_val[i] = std::max(button_val[i], float(ov.pressure[i]) / 255.0f);
         }
-        for (size_t i = 0; i < kPadAxisCount; ++i) axis_val[i] += ov.axis_f(static_cast<PadAxis>(i));
+        for (size_t i = 0; i < kPadAxisCount; ++i) axis_val[i] += ov.axis_fine(static_cast<PadAxis>(i));
     }
 
     s.connected = dev != nullptr || p.keyboard || p.overlay.connected;
@@ -729,10 +775,7 @@ void InputManager::evaluate_profile(const Player& p, const Device* dev, bool key
         else
             s.pressure[i] = pressed ? 255 : 0;
     }
-    for (size_t i = 0; i < kPadAxisCount; ++i) {
-        float v = std::clamp(axis_val[i], -1.0f, 1.0f);
-        s.axes[i] = u8(std::lround((v + 1.0f) * 127.5f));
-    }
+    for (size_t i = 0; i < kPadAxisCount; ++i) s.set_axis(static_cast<PadAxis>(i), axis_val[i]);
 }
 
 void InputManager::update(double dt) {
@@ -758,6 +801,7 @@ void InputManager::update(double dt) {
                                  : (delta > 0 ? InputSource::Half::Positive : InputSource::Half::Negative);
                 s.device = capture_tag(id);
                 captured_ = s;
+                captured_rest_ = base[a];
             }
         }
         if (captured_) capturing_ = false;
@@ -781,7 +825,9 @@ void InputManager::update(double dt) {
         const Device* steer = tagged_steering(p);
         for (const Device* d : {find_device(p.device), steer}) {
             if (!d || (d == steer && d->id == p.device)) continue;
-            if (p.ffb_age < 0.25) ffb_.apply(d->id, d->gamepad, d->joystick, d == steer ? -1 : brake_trigger(p), p.ffb, time_);
+            if (p.ffb_age < 0.25)
+                ffb_.apply(d->id, d->gamepad, d->joystick, d == steer ? -1 : pedal_trigger(p, PadButton::Square),
+                           d == steer ? -1 : pedal_trigger(p, PadButton::Cross), p.ffb, time_);
             else ffb_.stop(d->id);
         }
         p.ffb_age += dt;
@@ -793,9 +839,9 @@ void InputManager::set_force_feedback(int player, const ForceFeedbackState& stat
     players_[player].ffb_age = 0;
 }
 
-int InputManager::brake_trigger(const Player& p) const {
+int InputManager::pedal_trigger(const Player& p, PadButton pedal) const {
     for (const Binding& b : (p.race_reads_menu ? p.menu : p.race).bindings)
-        if (b.target.kind == PadTarget::Kind::Button && b.target.button == PadButton::Square &&
+        if (b.target.kind == PadTarget::Kind::Button && b.target.button == pedal &&
             b.source.kind == InputSource::Kind::PadAxis && b.source.device.empty() &&
             (b.source.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || b.source.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))
             return b.source.code;
@@ -806,13 +852,15 @@ bool use_phone_vibrator(bool enabled, int player, bool device_rumbles) {
     return enabled && player == 0 && !device_rumbles;
 }
 
-float phone_vibration_strength(const PadRumble& r) { return std::max(r.large / 255.0f, r.small ? 0.6f : 0.0f); }
+float phone_vibration_strength(const PadRumble& r) { return std::max(r.large, r.small) / 255.0f; }
 
-bool gt3_rumble(std::string_view mode, bool dualsense) {
-    if (mode == "gt3") return true;
-    if (mode == "modern") return false;
-    return dualsense;
+PadRumble dualsense_rumble(const PadRumble& r) {
+    PadRumble out = r;
+    out.small = u8(std::min(255.0f, r.small * 1.75f));
+    return out;
 }
+
+bool gt3_rumble(std::string_view mode) { return mode == "gt3"; }
 
 bool InputManager::dualsense(int player) const {
     const Device* d = find_device(players_[player].device);
@@ -867,13 +915,14 @@ int pick_auto_device(const std::vector<AutoRank>& devices) {
 
 PadState merge_pads(const std::vector<PadState>& pads) {
     PadState out;
-    auto off_rest = [](u8 v) { return std::abs(int(v) - 128); };
     for (const PadState& p : pads) {
         out.connected |= p.connected;
         out.buttons |= p.buttons;
         for (size_t i = 0; i < kPadButtonCount; ++i) out.pressure[i] = std::max(out.pressure[i], p.pressure[i]);
-        for (size_t i = 0; i < kPadAxisCount; ++i)
-            if (off_rest(p.axes[i]) > off_rest(out.axes[i])) out.axes[i] = p.axes[i];
+        for (size_t i = 0; i < kPadAxisCount; ++i) {
+            const PadAxis a = static_cast<PadAxis>(i);
+            if (std::fabs(p.axis_fine(a)) > std::fabs(out.axis_fine(a))) out.axes[i] = p.axes[i], out.fine[i] = p.fine[i];
+        }
     }
     return out;
 }
@@ -888,12 +937,15 @@ void InputManager::set_rumble(int player, const PadRumble& r) {
     if (player == 0)
         vibrate_phone(use_phone_vibrator(phone_vibration_, player, rumbles) ? phone_vibration_strength(r) : 0.0f);
     if (!d) return;
-    // DS2: large motor -> low-frequency rumble, small (on/off) -> high frequency.
-    Uint16 low = Uint16(r.large * 257);
-    Uint16 high = r.small ? 0xA000 : 0;
+    // Large motor -> low-frequency rumble (the left grip), small -> high frequency (the right grip).
+    const PadRumble m = d->dualsense ? dualsense_rumble(r) : r;
+    Uint16 low = Uint16(m.large * 257);
+    Uint16 high = Uint16(m.small * 257);
     // None to a wheel whose force effects are ours (ForceFeedback::drives_wheel): it would reset them.
-    if (d->gamepad) SDL_RumbleGamepad(d->gamepad, low, high, 250);
-    else if (!ffb_.drives_wheel(d->id)) SDL_RumbleJoystick(d->joystick, low, high, 250);
+    if (d->gamepad) {
+        const bool sent = SDL_RumbleGamepad(d->gamepad, low, high, 250);
+        ffb_.rumbling(d->id, sent ? m.large : 0, sent ? m.small : 0); // for the DualSense's trigger packets
+    } else if (!ffb_.drives_wheel(d->id)) SDL_RumbleJoystick(d->joystick, low, high, 250);
 }
 
 bool InputManager::phone_vibration_available() {

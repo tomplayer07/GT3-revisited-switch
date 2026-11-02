@@ -44,6 +44,7 @@
 #include "race/pylons.h"
 #include "race/race_scene.h"
 #include "race/road_shade.h"
+#include "race/sun_disc.h"
 #include "race/sun_glare.h"
 #include "render/view3d.h"
 #include "race/tyre_smoke.h"
@@ -405,84 +406,103 @@ TEST(race_rumble) {
     t.pad_output = true;
     const double dt = 1.0 / 60.0;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(true).large == 0 && !rm.rumble(true).small);
-    CHECK(rm.rumble(false).large == 0 && !rm.rumble(false).small);
+    CHECK(rm.rumble(true, false).large == 0 && !rm.rumble(true, false).small);
+    CHECK(rm.rumble(false, false).large == 0 && !rm.rumble(false, false).small);
     // GT3 original: the step's level goes to the large motor as it is (0..127); the small motor never runs.
     // Modern ignores it: nothing happened to the car.
     t.pad_rumble = 100;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(true).large == 100 && !rm.rumble(true).small);
-    CHECK(rm.rumble(false).large == 0 && !rm.rumble(false).small);
+    CHECK(rm.rumble(true, false).large == 100 && !rm.rumble(true, false).small);
+    CHECK(rm.rumble(false, false).large == 0 && !rm.rumble(false, false).small);
     t.pad_rumble = 127;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(true).large == 127);
-    // Modern: a hit pulses the large motor by its speed change for 0.25 s; below 1.5 m/s it is ignored.
+    CHECK(rm.rumble(true, false).large == 127);
+    // Modern: both motors for everything, the body leaning on the large one and the tyres on the small one, the
+    // other motor at 0.35, or 0.7 on a DualSense. A hit pulses by its speed change for 0.25 s; below 1.5 m/s it is
+    // ignored.
+    auto motors = [&rm](u8 large, u8 small, bool dualsense = false) {
+        const PadRumble r = rm.rumble(false, dualsense);
+        return r.large == large && r.small == small;
+    };
+    auto leans_small = [&rm] { // both motors run, the small one stronger
+        const PadRumble r = rm.rumble(false, false);
+        return r.large > 25 && r.large < r.small;
+    };
     ev.impact = 1.0f;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == 0);
+    CHECK(motors(0, 0));
     ev.impact = 10;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == 255 && rm.rumble(true).large == 127);
+    CHECK(motors(255, u8(0.35f * 255.0f)) && motors(255, u8(0.7f * 255.0f), true));
+    CHECK(rm.rumble(true, false).large == 127 && rm.rumble(true, true).large == 127);
     ev.impact = 0;
     for (int i = 0; i < 30; ++i) rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == 0); // the pulse ends
-    // Curbs pulse the small motor; off-road holds the large motor gently.
+    CHECK(motors(0, 0)); // the pulse ends
+    // Curbs pulse both motors, leaning small; off-road holds them gently, leaning large.
     ev.kerb = true;
-    bool on = false, off = false;
+    bool on = false, off = false, other = false;
     for (int i = 0; i < 30; ++i) {
         rm.update(s, &t, ev, in, dt);
-        (rm.rumble(false).small ? on : off) = true;
+        const bool pulse = motors(u8(0.35f * 0.63f * 255.0f), u8(0.63f * 255.0f));
+        if (pulse) CHECK(motors(u8(0.7f * 0.63f * 255.0f), u8(0.63f * 255.0f), true));
+        (pulse ? on : motors(0, 0) ? off : other) = true;
     }
-    CHECK(on && off && !rm.rumble(true).small);
+    CHECK(on && off && !other && !rm.rumble(true, false).small);
     ev.kerb = false, ev.offroad = true;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large > 40 && rm.rumble(false).large < 110);
+    const u8 rough = rm.rumble(false, false).large;
+    CHECK(rough > 40 && rough < 110 && rm.rumble(false, false).small > 0 && rm.rumble(false, false).small < rough);
     ev.offroad = false;
-    // A slide: the tyre squeal's slip intensity past 0.35 grows the large motor, at most 0.35 of full; a wheel in the
-    // air does not count.
+    // A slide: the tyre squeal's slip intensity past 0.35 grows the small motor, at most 0.4 of full; a wheel in
+    // the air does not count.
     for (sim::WheelState& w : s.wheels) w.grounded = true;
     t.smoke = {0.3f, 0.3f, 0.3f, 0.3f};
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == 0);
+    CHECK(motors(0, 0));
     t.smoke[2] = 0.8f;
     rm.update(s, &t, ev, in, dt);
-    const u8 sliding = rm.rumble(false).large;
-    CHECK(sliding > 30 && sliding < 50);
+    const u8 sliding = rm.rumble(false, false).small;
+    CHECK(sliding > 40 && sliding < 60 && rm.rumble(false, false).large > 0 && rm.rumble(false, false).large < sliding);
     t.smoke[2] = 2.0f;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == u8(0.35f * 255.0f));
+    CHECK(motors(u8(0.35f * 0.4f * 255.0f), u8(0.4f * 255.0f)));
+    CHECK(motors(u8(0.7f * 0.4f * 255.0f), u8(0.4f * 255.0f), true));
     s.wheels[2].grounded = false;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(false).large == 0);
+    CHECK(motors(0, 0));
     s.wheels[2].grounded = true;
     t.smoke = {};
     // A car the AI drives sends nothing either way: the motors stop. So does a step without telemetry.
     ev.impact = 10, ev.kerb = true;
     t.pad_output = false;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(true).large == 0 && rm.rumble(false).large == 0 && !rm.rumble(false).small);
+    CHECK(rm.rumble(true, false).large == 0 && rm.rumble(false, false).large == 0 && !rm.rumble(false, false).small);
     t.pad_output = true;
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.rumble(true).large == 127 && rm.rumble(false).large == 255);
+    CHECK(rm.rumble(true, false).large == 127 && rm.rumble(false, false).large == 255);
     rm.update(s, nullptr, ev, in, dt);
-    CHECK(rm.rumble(true).large == 0 && rm.rumble(false).large == 0);
+    CHECK(rm.rumble(true, false).large == 0 && rm.rumble(false, false).large == 0);
     rm.reset();
     ev = {};
-    // Wheelspin under throttle drives the right trigger (and Modern's large motor).
+    // Wheelspin under throttle drives the right trigger, the DualSense's throttle trigger (wheelspin) and Modern's
+    // motors.
     in.throttle = 1;
     for (sim::WheelState& w : s.wheels) w.slip_ratio = -0.6f; // wheelspin
     rm.update(s, &t, ev, in, dt);
     CHECK(rm.trigger_right() > 0.3f);
     CHECK(rm.trigger_left() == 0);
-    CHECK(rm.rumble(false).large > 40);
-    // Locked wheels under braking (positive slip) chatter on the left trigger.
+    CHECK(rm.wheelspin() > 0.8f);
+    CHECK(rm.rumble(false, false).small > 80 && leans_small());
+    // Locked wheels under braking (positive slip) chatter on the left trigger and hold Modern's motors.
     in.throttle = 0, in.brake = 1;
     for (sim::WheelState& w : s.wheels) w.slip_ratio = 0.7f;
     float peak = 0;
     for (int i = 0; i < 8; ++i) rm.update(s, &t, ev, in, dt), peak = std::max(peak, rm.trigger_left());
-    CHECK(peak > 0.4f && rm.trigger_right() == 0);
+    CHECK(peak > 0.4f && rm.trigger_right() == 0 && rm.wheelspin() == 0);
+    CHECK(rm.rumble(false, false).small > 80 && leans_small());
     rm.reset();
-    CHECK(rm.trigger_right() == 0 && rm.rumble(true).large == 0 && rm.rumble(false).large == 0);
+    CHECK(rm.trigger_right() == 0 && rm.wheelspin() == 0);
+    CHECK(rm.rumble(true, false).large == 0 && rm.rumble(false, false).large == 0);
 }
 
 // Render state decoded from course node programs: alpha-only frame buffer
@@ -2052,6 +2072,82 @@ TEST(race_flare_mesh_parse) {
     CHECK(m[0].verts[2].rgba[0] == 0xFF && m[0].verts[2].rgba[1] == 0 && m[0].verts[2].rgba[3] == 0xA8);
     b[0x14] = 2; // packet cut short: the strip table points past the vertices it holds
     CHECK(race::Flare::parse(b).empty());
+}
+
+// The flare system's own disc (the sun disc, the lamp halos): seven strips of rim 2k, centre,
+// rim 2k + 1, rim 2k + 2 around a 14-gon of radius 1; the colour rule of its vertex program.
+TEST(race_flare_disc_mesh) {
+    const race::Flare::Mesh& m = race::Flare::disc_mesh();
+    CHECK(m.verts.size() == 28 && m.tris.size() == 42);
+    if (m.verts.size() != 28 || m.tris.size() != 42) return;
+    const float kPi = 3.14159265f;
+    for (int k = 0; k < 7; ++k) {
+        const race::Flare::Vertex* s = &m.verts[size_t(4 * k)];
+        CHECK(s[1].x == 0 && s[1].y == 0 && s[1].rgba[0] == 0xFF && s[1].rgba[3] == 0xFF);
+        const int rims[3] = {0, 2, 3};
+        for (int i = 0; i < 3; ++i) {
+            const race::Flare::Vertex& v = s[rims[i]];
+            const float a = 2 * kPi * float(2 * k + i) / 14.0f;
+            CHECK(std::fabs(v.x - std::cos(a)) < 1e-5f && std::fabs(v.y - std::sin(a)) < 1e-5f && v.z == 0);
+            CHECK(v.rgba[0] == 0 && v.rgba[3] == 0);
+        }
+        CHECK(m.tris[size_t(6 * k)] == 4 * k && m.tris[size_t(6 * k + 5)] == 4 * k + 3);
+    }
+    CHECK(m.verts[27].x == 1.0f && m.verts[27].y == 0.0f); // rim 14 is rim 0, exactly
+    const race::Flare::Vertex& c = m.verts[1];
+    CHECK((race::Flare::gs_color(c, {2, 1, 0.017f}, 1) == std::array<u8, 4>{255, 255, 4, 255}));
+    CHECK((race::Flare::gs_color(c, {0.5f, 0.5f, 0.5f}, 0) == std::array<u8, 4>{127, 127, 127, 0}));
+}
+
+// The sun disc (presentation §I6): its colours from Env0, 10 m out along the sun in the
+// camera's screen plane, nothing for a disc size of 0 or the sun off.
+TEST(race_sun_disc) {
+    race::SunParams p;
+    p.enabled = true;
+    p.rgb = {1.35f, 0.92f, 0.63f}; // Seattle: gain 2, size 0.025
+    p.disc_gain = 2, p.disc_size = 0.025f;
+    scene::Model m = race::SunDisc::build(p);
+    CHECK(m.meshes.size() == 1);
+    if (m.meshes.size() != 1) return;
+    const scene::Mesh& mesh = m.meshes[0];
+    CHECK(mesh.vertices.size() == 28 && mesh.indices.size() == 42 && mesh.primitives.size() == 1);
+    CHECK(mesh.vertices[1].color == (255u | 234u << 8 | 160u << 16 | 255u << 24)); // centre: trunc(255 x RGB x gain / 2)
+    CHECK(mesh.vertices[0].color == 0);                                             // rim
+    const u32 f = mesh.primitives[0].flags;
+    CHECK((f & scene::kAdditive) && (f & scene::kNoDepthWrite) && (f & scene::kUnlit) && !(f & scene::kAlphaTest));
+    p.rgb = {0.34f, 0.29f, 0.13f}, p.disc_gain = 0.1f; // Laguna: a faint glow
+    CHECK(race::SunDisc::build(p).meshes[0].vertices[1].color == (4u | 3u << 8 | 1u << 16 | 255u << 24));
+    p.disc_size = 0; // Super Speedway
+    CHECK(race::SunDisc::build(p).meshes.empty());
+    p.disc_size = 0.1f, p.enabled = false;
+    CHECK(race::SunDisc::build(p).meshes.empty());
+    // A camera at (1, 2, 3) turned 90 degrees left (right = -z, up = y), the sun along -x.
+    render::Mat4 t = race::SunDisc::transform({1, 2, 3}, {-1, 0, 0}, 0.045f, {0, 0, -1}, {0, 1, 0});
+    render::Vec3 c = t.transform_point({0, 0, 0}), r = t.transform_point({1, 0, 0}), u = t.transform_point({0, 1, 0});
+    CHECK(std::fabs(c.x + 9) < 1e-5f && std::fabs(c.y - 2) < 1e-5f && std::fabs(c.z - 3) < 1e-5f);
+    CHECK(std::fabs(r.z - (3 - 0.45f)) < 1e-5f && std::fabs(r.x - c.x) < 1e-5f);
+    CHECK(std::fabs(u.y - (2 + 0.45f)) < 1e-5f);
+}
+
+// The disc's sun on the disc's courses: Trial Mountain white, Super Speedway none.
+TEST(race_sun_disc_disc) {
+    Disc* disc = test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    auto params = [&](const char* name) {
+        Bytes data = disc->volume().read(*disc->volume().find(std::string("courses/US/") + name));
+        course::CourseFile f = course::CourseFile::parse(data);
+        return race::SunParams::from_env0(f.section(data, course::kSlotEnv));
+    };
+    race::SunParams tm = params("trialmt");
+    CHECK(tm.enabled && std::fabs(tm.disc_size - 0.045f) < 1e-6f);
+    scene::Model m = race::SunDisc::build(tm);
+    CHECK(m.meshes.size() == 1 && m.meshes[0].vertices[1].color == 0xFFFFFFFFu);
+    CHECK(race::SunDisc::build(params("super")).meshes.empty());
+    // The course draw's flags: billboards in Seattle's main view, not in its 2P halves or mirror;
+    // Rome's in its 2P halves too.
+    race::SunParams se = params("seattle"), ro = params("rome");
+    CHECK((se.view_flags[0] & 1) && !(se.view_flags[1] & 1) && !(se.view_flags[2] & 1));
+    CHECK((ro.view_flags[0] & 1) && (ro.view_flags[1] & 1) && !(ro.view_flags[2] & 1));
 }
 
 TEST(race_course_scene_lights) {

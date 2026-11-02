@@ -224,7 +224,7 @@ public:
         note_left_ -= dt;
         if (rumble_left_ > 0) { // Test rumble
             rumble_left_ -= dt;
-            app.input().set_rumble(rumble_player_, rumble_left_ > 0 ? PadRumble{true, 200} : PadRumble{});
+            app.input().set_rumble(rumble_player_, rumble_left_ > 0 ? PadRumble{200, 200} : PadRumble{});
         }
         if (capture_.state != Capture::State::Idle) {
             update_capture(app, dt);
@@ -651,6 +651,28 @@ private:
         detail.enabled = scale.enabled;
         if (!detail.enabled) detail.desc = msaa.desc;
 
+        Row& rims = toggle("Showroom wheels in races",
+                           "Cars up close get the detailed rims and tires of the car menus. Off: GT3's race "
+                           "wheels, flat rims with painted spokes.",
+                           app.showroom_wheels(), [a](bool v) {
+                               a->config().set("video", "showroom_wheels", v ? "on" : "off");
+                               a->save_config();
+                           });
+        rims.enabled = scale.enabled;
+        if (!rims.enabled) rims.desc = msaa.desc;
+
+#if !defined(__SWITCH__)
+        // [video] heat_haze = on | off (default off; RaceScreen::add_screen_passes)
+        Row& haze = toggle("Heat haze in replays",
+                           "GT3's heat shimmer over some trackside camera shots in replays, on some courses.",
+                           to_lower(cfg.get("video", "heat_haze").value_or("off")) == "on", [a](bool v) {
+                               a->config().set("video", "heat_haze", v ? "on" : "off");
+                               a->save_config();
+                           });
+        haze.enabled = scale.enabled;
+        if (!haze.enabled) haze.desc = msaa.desc;
+#endif
+
         // [video] gpu = auto | gles | gles_driver | 0 (App::init)
         const std::string gpu_cfg = to_lower(cfg.get("video", "gpu").value_or("auto"));
         const bool gpu_off = gpu_cfg == "0" || gpu_cfg == "off";
@@ -1075,6 +1097,20 @@ private:
                            a->input().set_keyboard(p, v);
                            a->save_config();
                        });
+            {
+                const float c = in.steering_curve(p);
+                char text[24];
+                std::snprintf(text, sizeof(text), std::fabs(c - 1.0f) < 0.005f ? "%.1f (linear)" : "%.1f", double(c));
+                slider(in.wheel_steering(p) ? "Wheel steering curve" : "Steering curve",
+                       "Races. 1.0 steers as far as you turn. Higher: finer near the centre (a wheel set to a small "
+                       "rotation). Lower: quicker off the centre (a large rotation). Full lock stays at the end. A "
+                       "wheel and other controllers each keep their own.",
+                       c, InputManager::kSteeringCurveMin, InputManager::kSteeringCurveMax, 0.1f, text,
+                       [a, p](float v) {
+                           a->input().set_steering_curve(p, v);
+                           a->save_config();
+                       });
+            }
             binding_rows(app, p);
         }
     }
@@ -1311,9 +1347,10 @@ private:
             end_capture(app);
             return;
         }
-        if (auto src = in.poll_capture()) {
-            const bool bound = capture_.race ? in.bind_race(capture_.player, capture_.target, *src, !capture_.append)
-                                             : in.bind(capture_.player, capture_.target, *src, !capture_.append);
+        if (auto c = in.poll_capture()) {
+            const bool bound =
+                capture_.race ? in.bind_race(capture_.player, capture_.target, c->source, !capture_.append, c->rest)
+                              : in.bind(capture_.player, capture_.target, c->source, !capture_.append, c->rest);
             if (!bound) {
                 note_ = capture_.race ? "A button or key can't steer both ways: bind it to Steer left or Steer right."
                                       : "A button or key can't move a stick both ways: use the D-pad rows.";
@@ -1371,16 +1408,15 @@ private:
         for (int p = 0; p < InputManager::kMaxPlayers; ++p) {
             heading(p == 0 ? "Player 1" : "Player 2 (split screen)");
             {
-                // Auto shows what it plays on the controller in use.
+                // Auto shows what it plays.
                 static const char* const kModes[] = {"auto", "modern", "gt3"};
                 const std::string& mode = in.rumble_mode(p);
                 const int midx = mode == "modern" ? 1 : mode == "gt3" ? 2 : 0;
-                const char* const autos = gt3_rumble("auto", in.dualsense(p)) ? "Auto: GT3 original" : "Auto: Modern";
                 choice("Rumble",
-                       "Modern: wall and car hits, curbs, off-road, wheelspin and slides. GT3 original: GT3's own "
-                       "rumble, which most controllers play much stronger than a DualShock 2. Auto: GT3 original on a "
-                       "DualSense.",
-                       {autos, "Modern", "GT3 original"}, midx, [a, p](int i) {
+                       "Modern: both grips, hits and off-road stronger in the left, curbs, wheelspin, slides and "
+                       "locked wheels in the right. GT3 original: GT3's own rumble, which most controllers play "
+                       "much stronger than a DualShock 2.",
+                       {"Auto: Modern", "Modern", "GT3 original"}, midx, [a, p](int i) {
                            a->input().set_rumble_mode(p, kModes[i]);
                            a->save_config();
                        });
@@ -1410,7 +1446,7 @@ private:
             apply(n);
         });
         size_t base = rows_.size();
-        toggle("Trigger effects", "DualSense brake resistance and ABS pulse; Xbox impulse triggers.", c.triggers,
+        toggle("Trigger effects", "DualSense brake resistance, ABS pulse and wheelspin buzz; Xbox impulse triggers.", c.triggers,
                           [apply, c](bool v) {
                               ForceFeedbackConfig n = c;
                               n.triggers = v;
@@ -1566,7 +1602,7 @@ private:
         } else {
             info("Current disc", "None");
         }
-        action("Browse for a disc image...", "Pick a .iso made from your own Gran Turismo 3 A-Spec disc.", "",
+        action("Browse for a disc image...", "Pick a .iso or .chd made from your own Gran Turismo 3 A-Spec disc.", "",
                [a] { a->show_open_dialog(); });
 
         std::vector<std::string> recent = app.recent_discs();

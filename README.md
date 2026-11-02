@@ -14,7 +14,7 @@ modern platforms: **Nintendo Switch (Atmosphère)**, **Windows, macOS, Linux, An
 > - **Status & Community Help Wanted**: Night tracks (Special Stage Route 5, Route 11) are playable but experience performance drops (~25-35 FPS). Community contributions and optimizations are welcome! See details [below](#-nintendo-switch-port).
 
 GT3 Revisited contains **no game data or assets**. It needs a
-disc image (`.iso`) that you made from your own copy of the game. At runtime
+disc image (`.iso` or `.chd`) that you made from your own copy of the game. At runtime
 it reads the image directly and decodes the assets. Nothing is extracted to
 disk or redistributed.
 
@@ -95,6 +95,24 @@ To help future contributors understand what has already been tried and where the
 
 6. **Tuned Track Draw Distance (`src/app/screen_race_render.cpp`)**:
    - **Optimization**: Reduced the global track draw distance from upstream's 2,500 meters down to **650 meters** on Switch. This culls distant scenery that is invisible or imperceptible on a 720p handheld screen, preventing unnecessary vertex transformations and frustum checks.
+
+### Upstream 0.6.0 integration on Switch
+
+The native Switch renderer retains the 0.4.0 fixes for car and prize reflections,
+car-lamp occlusion, decal depth and save overwrites, alongside upstream's new
+controls, demos, wheel/brake geometry, sparks and vertex-colour correction.
+CHD images can be opened alongside ISO images; `gt3.chd` in the app folder is
+also detected at startup.
+
+Sun/lamp overlays and replay vignettes use SDL's 2D renderer on Switch. Replay
+depth of field and heat haze are currently disabled on the native renderer.
+Wheel spin blur is supported but defaults off on Switch to limit texture
+sampling cost; opt in with `[video] wheel_spin_blur = on`. Showroom wheels
+retain upstream's mobile default (off).
+
+The native GLES shaders are generated from the shared GLSL sources:
+`python3 tools/switch/generate_gles_shaders.py` updates the committed header;
+add `--check` to verify it is current after an upstream shader change.
 
 ### Experimental night-track testing (October 31)
 
@@ -247,8 +265,8 @@ of the steps above.
 
 You need a disc image of *Gran Turismo 3 A-Spec*. The NTSC-U releases
 (SCUS-97102 and the PBPX-95503 bundle disc) are verified; other regions are
-untested ([COMPATIBILITY](docs/COMPATIBILITY.md)). Only `.iso` images are
-read.
+untested ([COMPATIBILITY](docs/COMPATIBILITY.md)). Use a `.iso` image or a `.chd`
+created from it with `chdman createdvd`.
 
 ```bash
 gt3r                                  # first run asks for your disc image
@@ -257,7 +275,7 @@ gt3r                                  # first run asks for your disc image
 gt3r "/path/to/Gran Turismo 3.iso"    # or pass it directly
 ```
 
-You can also drag the `.iso` onto the window. On Android and the Quest, choose
+You can also drag the `.iso` or `.chd` onto the window. On Android and the Quest, choose
 **Open disc image** and pick the file ([android/README.md](android/README.md)). On
 iOS, **Open disc image** shows the Files app's picker: the image can be anywhere it
 reaches (On My iPhone, a network share, another app's folder) and is read where it
@@ -318,39 +336,11 @@ beside it instead.
 
 ### Your music
 
-Your own MP3, FLAC and WAV files can play as race songs. Put them in the user
-data folder's `music/` (at any depth; on phones and tablets the Files app shows
-it as GT3 Revisited > music), or choose the folder they're in with **Settings →
-Audio → Music folder**: they play from there, nothing is copied. On Android the
-game asks to read your music files, and the folder has to be on the device or
-its memory card (not in a cloud drive's app); if you take that permission back
-in Android's settings, Settings says so and your playlist waits for it. On iOS
-the folder is picked as in the Files app (On My iPhone, iCloud Drive). Titles and artists come from the files'
-tags (ID3, FLAC comments, WAV INFO), otherwise from the file name. AAC (`.m4a`),
-Ogg and other formats don't play, nor do damaged files; Settings counts the files
-it skipped. Every folder inside is searched, linked folders too (32 levels deep at
-most; names starting with `.` are skipped), up to 10,000 songs (the first ones in
-name order). Moving an album's folder keeps its songs' check marks and order. If
-the music folder can't be read (a drive unplugged), your playlist is kept for when
-it's back. The songs found are remembered, so the next start has them at once,
-before it has looked through the folder again.
-
-Your songs play as loud as the disc's race songs: the game turns each one up or
-down to the disc songs' average, by at most 12 dB up (less when that would
-clip) and 20 dB down. A song is measured the first time it plays (it eases to
-its level a moment after it starts) and the next song in your list while it
-plays, so most start at the right level; what was measured is remembered.
-
-The game's **Options → Favorite Music List** then has three tabs over the list
-(Up from the first song, or L1 / R1): **Original** plays the disc's race songs
-as the original does, **Custom** only yours, **Both** the two lists mixed song
-by song (Shuffle draws from both evenly; Order takes turns, one of each). Each
-tab's list is edited as the original's is: check marks, the order, Order /
-Shuffle (also at the right of the tab row, so it's in reach of a long list).
-L2 / R2 jump a screen of songs at a time; a drag or the mouse wheel scrolls.
-Without songs in the folder the tabs are hidden and the disc's list plays. In races, the pause screen shows the song with L1 / R1 to skip, and
-Next / Previous song can be bound to chords or touch buttons
-([INPUT](docs/INPUT.md#song-controls)).
+Your own MP3, FLAC and WAV files can play as race songs, in place of the
+disc's or mixed with them: choose their folder in **Settings → Audio → Music
+folder** (or copy them into `music/`), then pick the **Custom** or **Both** tab
+in the game's **Options → Favorite Music List**. In races, the pause screen's
+L1 / R1 skip songs. Step by step: [MUSIC](docs/MUSIC.md).
 
 ### Settings
 
@@ -377,6 +367,8 @@ are only there:
 | `[video] render_scale` | `auto`, `0.5`..`4.0` | 3D resolution vs. the screen; above `1.0` the 3D views render larger and are scaled down (supersampling), up to 16384 pixels a side |
 | `[video] dynamic_resolution` | `on` / `off` | lower the 3D resolution (to 50% at most) when the GPU can't keep up and raise it while it keeps up, up to `render_scale`; with `auto`, up to the screen's full resolution (at most 1440 lines), starting where the last race ended (kept in `dynamic_start`). Default on for phones and tablets |
 | `[video] full_car_detail` | `on` / `off` | every car in full detail at any distance; `off`: distant cars switch to GT3's simpler models. Default on, off for phones and tablets |
+| `[video] showroom_wheels` | `on` / `off` | close cars in races get the car menus' detailed rims and tires; `off`: GT3's race wheels. Default on, off for phones and tablets |
+| `[video] heat_haze` | `on` / `off` | GT3's heat shimmer over some trackside camera shots in replays, on some courses. Default off |
 | `[video] gpu` | `auto` / `gles` / `gles_driver` / `0` | the 3D renderer: `auto` = SDL_GPU (Vulkan, Metal), or OpenGL ES where the GPU has no Vulkan (Windows, Linux); `gles` = OpenGL ES first; `gles_driver` = the same on Windows with the graphics driver's OpenGL ES rather than ANGLE; `0` = 2D-only (restart required). Settings offers only the kinds of OpenGL ES that open on the computer |
 | `[video] original_res` | `on` / `off` | *(file)* races at the PS2's 640×448 in a 4:3 frame |
 | `[video] original_filter` | `nearest` / `bilinear` | *(file)* upscaling filter for `original_res` |
@@ -555,7 +547,7 @@ cmake --build build -j
   `gt3r`. SDL3 is fetched automatically, or install it with vcpkg. 3D uses
   Vulkan, or OpenGL ES 3.0 on GPUs without it: the driver's, or ANGLE's when
   `-DGT3R_ANGLE_DIR=<folder>` points at a folder with its DLLs and license
-  (`vcpkg install angle:x64-windows-angle --overlay-triplets=packaging/vcpkg-triplets`;
+  (`pwsh packaging/angle.ps1` builds them into `angle\` with vcpkg;
   [RENDERING](docs/dev/RENDERING.md#opengl-es)).
 - **Linux**: install your distro's SDL3 development package, or let CMake
   fetch and build it. Building SDL needs its window, audio and input
@@ -627,6 +619,7 @@ Run `gt3tool` without arguments for the full list.
 - [docs/behaviour/](docs/behaviour/): how the original game behaves, per
   system (physics, AI, GT Mode, menus, race presentation, sound, music)
 - [INPUT](docs/INPUT.md): controller support and binding syntax
+- [MUSIC](docs/MUSIC.md): playing your own music in races
 - [MODDING](docs/MODDING.md): making and installing mods
 - [COMPATIBILITY](docs/COMPATIBILITY.md): tested disc versions
 - `docs/dev/`: implementation notes per area (race, GT Mode, physics, AI,
@@ -662,6 +655,10 @@ original program's code in any form.
   ([third_party/dr_libs](third_party/dr_libs)).
 - [SDL 3](https://libsdl.org) and [zlib](https://zlib.net), zlib License,
   fetched at build time (Windows builds ship `SDL3.dll`).
+- [libchdr](https://github.com/rtissera/libchdr) v0.3.0, BSD 3-Clause, reads
+  `.chd` disc images; it vendors the LZMA SDK (public domain), miniz (MIT) and
+  zstd (BSD 3-Clause). Fetched at build time. Its notices and theirs are in
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which the Windows, macOS and Linux packages ship.
 - The [Khronos](https://github.com/KhronosGroup/OpenGL-Registry) OpenGL ES 3.0
   headers (`third_party/khronos`), MIT and Apache 2.0, for the OpenGL ES renderer.
 - [ANGLE](https://chromium.googlesource.com/angle/angle), BSD 3-Clause, built

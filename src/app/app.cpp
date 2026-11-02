@@ -29,7 +29,7 @@ namespace gt3r {
 namespace {
 
 const SDL_DialogFileFilter kDiscFilters[] = {
-    {"PS2 disc images", "iso"},
+    {"PS2 disc images", "iso;chd"},
     {"All files", "*"},
 };
 
@@ -262,9 +262,13 @@ bool App::init(int argc, char** argv) {
         const char* default_switch_paths[] = {
             "sdmc:/switch/gt3r/gt3.iso",
             "sdmc:/switch/gt3r/GT3.iso",
+            "sdmc:/switch/gt3r/gt3.chd",
+            "sdmc:/switch/gt3r/GT3.chd",
             "sdmc:/switch/gt3/gt3.iso",
             "gt3.iso",
             "GT3.iso",
+            "gt3.chd",
+            "GT3.chd",
         };
         for (const char* p : default_switch_paths) {
             if (open_disc(p).empty() && disc_) break;
@@ -536,6 +540,10 @@ void App::set_aspect(platform::Aspect a) {
 
 bool App::full_car_detail() const {
     return to_lower(config_.get("video", "full_car_detail").value_or(platform::is_mobile() ? "off" : "on")) == "on";
+}
+
+bool App::showroom_wheels() const {
+    return to_lower(config_.get("video", "showroom_wheels").value_or(platform::is_mobile() ? "off" : "on")) == "on";
 }
 
 bool App::dynamic_resolution() const {

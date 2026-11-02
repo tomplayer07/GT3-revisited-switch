@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GT3Revisited VERSION 0.5.0 LANGUAGES C CXX)
+project(GT3Revisited VERSION 0.6.0 LANGUAGES C CXX)
 
 # GT3 Revisited: an open reimplementation of the Gran Turismo 3 engine.
 # No game data is part of this project; everything is read at runtime from
@@ -43,7 +43,7 @@ file(GLOB_RECURSE GT3R_ENGINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/
 list(FILTER GT3R_ENGINE_SOURCES EXCLUDE REGEX "/src/app/")
 add_library(gt3r_engine STATIC ${GT3R_ENGINE_SOURCES})
 target_include_directories(gt3r_engine PUBLIC src)
-target_link_libraries(gt3r_engine PUBLIC SDL3::SDL3 ZLIB::ZLIB)
+target_link_libraries(gt3r_engine PUBLIC SDL3::SDL3 ZLIB::ZLIB chdr-static)
 if(GT3R_LIBTOOL_QUIET)
   set_target_properties(gt3r_engine PROPERTIES STATIC_LIBRARY_OPTIONS ${GT3R_LIBTOOL_QUIET})
 endif()
@@ -201,8 +201,8 @@ else()
 endif()
 
 # Windows: ANGLE (OpenGL ES on Direct3D 11) for the OpenGL ES renderer, copied next to gt3r.exe
-# and packaged with it: libEGL.dll, libGLESv2.dll and LICENSE-ANGLE.txt, built with vcpkg as CI's
-# Windows package job does (packaging/vcpkg-triplets). Without it the renderer uses the driver's
+# and packaged with it: libEGL.dll, libGLESv2.dll and LICENSE-ANGLE.txt, built with vcpkg by
+# packaging/angle.ps1 as CI's Windows package does. Without it the renderer uses the driver's
 # OpenGL ES.
 set(GT3R_ANGLE_DIR "" CACHE PATH "Windows: folder with ANGLE's libEGL.dll, libGLESv2.dll and LICENSE-ANGLE.txt")
 if(WIN32 AND GT3R_ANGLE_DIR)
