@@ -279,6 +279,9 @@ private:
 
 // Screen factories (one file each).
 std::unique_ptr<Screen> make_setup_screen();
+#if defined(__SWITCH__)
+std::unique_ptr<Screen> make_disc_picker_screen();
+#endif
 std::unique_ptr<Screen> make_hub_screen();       // home menu under the game
 std::unique_ptr<Screen> make_developer_screen(); // Developer options (tools)
 std::unique_ptr<Screen> make_browser_screen(const std::string& open_path = "");

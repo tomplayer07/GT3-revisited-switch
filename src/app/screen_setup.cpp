@@ -13,10 +13,115 @@
 
 #include <algorithm>
 #include <cmath>
+#if defined(__SWITCH__)
+#include <dirent.h>
+#include <cerrno>
+#include <cstring>
+#include <cctype>
+#include <sys/stat.h>
+#endif
 
 namespace gt3r {
 
 namespace {
+
+#if defined(__SWITCH__)
+// SDL has no native file dialog on Switch. Browse the mounted SD directly.
+class DiscPickerScreen : public Screen {
+public:
+    void update(App& app, double) override {
+        if (dirty_) refresh();
+        const auto& m = app.menu();
+        const int count = int(entries_.size()) + 1;
+        const int page = m.pressed(PadButton::L1) ? -kRows : m.pressed(PadButton::R1) ? kRows : 0;
+        selected_ = std::clamp(selected_ + m.vertical() + page, 0, count - 1);
+        if (m.pressed(PadButton::Triangle) || m.pressed(PadButton::Circle)) {
+            back(app);
+            return;
+        }
+        if (!m.pressed(PadButton::Cross)) return;
+        if (selected_ == 0) { back(app); return; }
+        const Entry entry = entries_[size_t(selected_ - 1)];
+        if (entry.directory) {
+            path_ += entry.name + "/";
+            selected_ = 0;
+            refresh();
+        } else {
+            app.request_disc(path_ + entry.name);
+            app.pop();
+        }
+    }
+
+    void render(App&, Ui& ui) override {
+        ui.header("OPEN DISC IMAGE", Ui::elide(path_, Ui::kWidth - 180));
+        const int count = int(entries_.size()) + 1;
+        const int first = ui.list_window(count, selected_, kRows);
+        for (int row = 0; row < kRows && first + row < count; ++row) {
+            const int index = first + row;
+            const float y = 30 + row * 14.0f;
+            if (index == selected_) ui.fill(8, y - 2, Ui::kWidth - 16, 14, colors::kHighlight);
+            const bool directory = index > 0 && entries_[size_t(index - 1)].directory;
+            const std::string label = index == 0 ? (path_ == kRoot ? "Cancel" : "[..] Parent folder")
+                : entries_[size_t(index - 1)].name + (directory ? "/" : "");
+            ui.text(12, y, Ui::elide(label, Ui::kWidth - 32), directory ? colors::kAccent : colors::kText);
+        }
+        if (!error_.empty()) ui.text(12, 304, Ui::elide(error_, Ui::kWidth - 24), colors::kBad);
+        else if (entries_.empty()) ui.text(12, 304, "No folders or ISO/CHD files in this folder.", colors::kDim);
+        else ui.text_right(Ui::kWidth - 12, 304, std::to_string(selected_ + 1) + "/" + std::to_string(count), colors::kDim);
+        ui.footer("Up/Down: select   Confirm: open   Back: parent/cancel   L/R: page");
+    }
+
+private:
+    struct Entry { std::string name; bool directory; };
+    static constexpr const char* kRoot = "sdmc:/";
+    static constexpr int kRows = 18;
+    std::string path_ = kRoot, error_;
+    std::vector<Entry> entries_;
+    int selected_ = 0;
+    bool dirty_ = true;
+
+    void back(App& app) {
+        if (path_ == kRoot) { app.pop(); return; }
+        const std::string previous = path_;
+        path_.pop_back();
+        path_.resize(path_.find_last_of('/') + 1);
+        refresh();
+        selected_ = 0;
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (path_ + entries_[i].name + "/" == previous) selected_ = int(i) + 1;
+    }
+
+    void refresh() {
+        dirty_ = false;
+        entries_.clear();
+        error_.clear();
+        DIR* directory = opendir(path_.c_str());
+        if (!directory) { error_ = std::string("Cannot read folder: ") + std::strerror(errno); return; }
+        for (;;) {
+            errno = 0;
+            const dirent* item = readdir(directory);
+            if (!item) {
+                if (errno) error_ = std::string("Cannot finish reading folder: ") + std::strerror(errno);
+                break;
+            }
+            const std::string name = item->d_name;
+            if (name == "." || name == "..") continue;
+            struct stat info{};
+            if (stat((path_ + name).c_str(), &info) != 0) continue;
+            const bool folder = S_ISDIR(info.st_mode);
+            std::string ext;
+            if (const size_t dot = name.find_last_of('.'); dot != std::string::npos) ext = name.substr(dot);
+            for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+            if (folder || (S_ISREG(info.st_mode) && (ext == ".iso" || ext == ".chd")))
+                entries_.push_back({name, folder});
+        }
+        closedir(directory);
+        std::sort(entries_.begin(), entries_.end(), [](const Entry& a, const Entry& b) {
+            return a.directory != b.directory ? a.directory > b.directory : a.name < b.name;
+        });
+    }
+};
+#endif
 
 // iOS apps do not quit themselves (Apple's guidelines; the app switcher closes them): no Quit
 // item there, and Triangle on these top screens stays where it is.
@@ -133,7 +238,7 @@ public:
             if (it.kind == Item::Settings) rects_[i] = {lx, y + bh + 8, kCanQuit ? std::floor((lw - 8) / 2) : lw, sh};
             if (it.kind == Item::Quit) rects_[i] = {lx + std::floor((lw - 8) / 2) + 8, y + bh + 8, std::floor((lw - 8) / 2), sh};
         }
-#if !defined(SDL_PLATFORM_ANDROID) && !defined(SDL_PLATFORM_IOS)
+#if !defined(SDL_PLATFORM_ANDROID) && !defined(SDL_PLATFORM_IOS) && !defined(__SWITCH__)
         if (!touch) ui.text(lx, y + bh + 8 + sh + 10, "or drop the .iso or .chd onto this window", colors::kDim);
 #endif
 
@@ -460,6 +565,9 @@ private:
 } // namespace
 
 std::unique_ptr<Screen> make_setup_screen() { return std::make_unique<SetupScreen>(); }
+#if defined(__SWITCH__)
+std::unique_ptr<Screen> make_disc_picker_screen() { return std::make_unique<DiscPickerScreen>(); }
+#endif
 std::unique_ptr<Screen> make_hub_screen() { return std::make_unique<HubScreen>(false); }
 std::unique_ptr<Screen> make_developer_screen() { return std::make_unique<HubScreen>(true); }
 
