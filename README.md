@@ -221,6 +221,13 @@ also need measurement rather than assuming a fixed 60-to-30 FPS transition.
    ```
    sdmc:/switch/gt3r/gt3.iso
    ```
+   On Switch, **Open disc image** opens an SD card browser: navigate folders with
+   Up/Down and the confirm button, then select your `.iso` or `.chd` file (any
+   filename, including uppercase extensions). Use Back to go to the parent folder
+   or cancel at the SD root, and L/R to move a page at a time. The selected image
+   is remembered for the next launch. The same browser is available when changing
+   the disc in Settings. Automatic detection of `gt3.iso` in the folder above
+   remains available.
 4. **Important**: Launch the Homebrew Menu using **Title Override** (hold `R` while launching any installed game), **not Applet Mode**, so the game has access to the full 3.5+ GB of system RAM.
 5. **Recommended Overclock (via Sys-CLK)**:
    - **CPU**: 1500 MHz - 1785 MHz

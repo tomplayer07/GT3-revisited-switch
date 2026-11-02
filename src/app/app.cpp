@@ -628,12 +628,16 @@ void App::close_disc() {
 }
 
 void App::show_open_dialog() {
+#if defined(__SWITCH__)
+    push(make_disc_picker_screen());
+#else
     // iOS: SDL has no file dialog there; the system's document picker opens the image in place.
     if (platform::show_document_picker(window_, kDiscFilters, SDL_arraysize(kDiscFilters), [this](std::string path) {
             if (!path.empty()) set_dialog_result(std::move(path));
         }))
         return;
     SDL_ShowOpenFileDialog(on_dialog, this, window_, kDiscFilters, SDL_arraysize(kDiscFilters), nullptr, false);
+#endif
 }
 
 void App::set_dialog_result(std::string path) {
