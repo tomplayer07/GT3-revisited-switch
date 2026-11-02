@@ -23,6 +23,7 @@
 #include "formats/course/visibility.h"
 #include "render/math3d.h"
 #include "render/screen_batch.h"
+#include "race/lamp_visibility_cache.h"
 
 #include <SDL3/SDL_render.h>
 
@@ -81,6 +82,7 @@ struct LampType {
 };
 
 struct Lamp {
+    size_t visibility_id = 0;
     int type = 0;
     render::Vec3 pos, dir;
     float phase = 0;
@@ -94,6 +96,7 @@ public:
     void load(SDL_Renderer* r, render::GpuContext* gpu, ByteSpan gtfx, ByteSpan env0, ByteSpan vls0, ByteSpan flare);
     size_t count() const { return count_; }
     void tick(double seconds) { time_ += seconds; }
+    void set_visibility_interval(int frames) { visibility_interval_ = frames; visibility_cache_.reset(); }
     using Blocked = std::function<bool(const render::Vec3&, const render::Vec3&)>;
     // Adds the glows over `rect` to `b`, which the view draws before its grade (presentation
     // §L6). `blocked(from, to)`: true if the segment is occluded.
@@ -115,6 +118,8 @@ private:
     Flare flare_;
     render::SpriteTexture glow_; // stand-in when race/flare.bin is missing
     double time_ = 0;
+    int visibility_interval_ = 1;
+    mutable LampVisibilityCache visibility_cache_;
 };
 
 // Car lamp glows (GT3's car lamp pass; on courses with Env0 flag 0x8000,

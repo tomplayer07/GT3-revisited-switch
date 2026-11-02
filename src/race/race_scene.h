@@ -13,6 +13,7 @@
 #include "render/gpu_model.h"
 #include "race/lamp_glows.h"
 #include "render/view3d.h"
+#include "render/visibility.h"
 #include "race/wheel_fx.h"
 #include "sim/sim_types.h"
 
@@ -144,6 +145,9 @@ struct CarLook {
     const WheelView* wheels = nullptr;
     WheelTrack* wheel_track = nullptr;
     bool focus = false;
+    // Optional early body preparation cull. Shadows and headlamp pools remain
+    // independent of this volume; the rear-view mirror uses its usual path.
+    const render::ViewFrustum* visibility = nullptr;
 };
 
 class CarVisual {
@@ -182,6 +186,10 @@ public:
     void set_brake_parts(const BrakeParts& bin);
 
 private:
+    bool body_visible(const sim::VehicleState& s, const sim::VehicleSetup& setup,
+                      const render::ViewFrustum& view) const;
+    float body_radius_ = 0;
+    std::array<float, 4> wheel_radius_{};
     // `wheel_fx`: the wheels' brake parts and spin blurs (not for the wet road's mirrored car,
     // whose wheels GT3 draws as its farthest level).
     void add_body_items(std::vector<render::DrawItem>& items, const sim::VehicleState& s, const sim::VehicleSetup& setup,

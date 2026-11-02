@@ -335,6 +335,7 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
     lamp_occluder_.add_opaque_body(body);
     lamp_occluder_.build(0.5f); // local car coordinates; built once, transformed rays each frame
     body_ = std::make_unique<render::GpuModel>(ctx, body);
+    body_radius_ = render::model_origin_radius(body);
     if (!morphs_.empty()) {
         scene::Model mm; // the textures the morph parts use, then their meshes at the defaults
         mm.name = model + "_morph";
@@ -347,6 +348,7 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
                 }
         size_t draws = 0;
         for (gtm1::MorphDraws& md : morphs_) {
+            body_radius_ = std::max(body_radius_, md.bounding_radius());
             md.map_textures(map);
             draws += md.size();
             for (scene::Mesh& m : md.meshes(gtm1::kCarCallbackDefaults)) mm.meshes.push_back(std::move(m));
@@ -371,6 +373,7 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
         scene::Model lit = load_car_model(car_file, bo, model);
         scene::Model lit_body = extract(lit, [](const scene::Mesh& m) { return m.name.rfind("node", 0) != 0; });
         if (!lit_body.meshes.empty()) body_brake_ = std::make_unique<render::GpuModel>(ctx, lit_body);
+        body_radius_ = std::max(body_radius_, render::model_origin_radius(lit_body));
     }
     // The wheels' effects (race/wheel_fx.h): the tyre's GTTR fields, the brake records, and the
     // rim's images in the wheel file's texture table (GTM1 +0x34, table 0: entry 1 the rim,
@@ -433,6 +436,8 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
         if (!tyre.meshes.empty()) tyres_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, tyre);
         scene::Model band = hub_model(n + "_band");
         if (!band.meshes.empty()) bands_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, band);
+        wheel_radius_[size_t(i)] = std::max({render::model_origin_radius(rim), render::model_origin_radius(race_rim),
+                                            render::model_origin_radius(tyre), render::model_origin_radius(band)});
     }
 }
 
@@ -445,6 +450,8 @@ void CarVisual::set_brake_parts(const BrakeParts& bin) {
         if (!parts.meshes.empty()) brakes_[size_t(i)] = std::make_unique<render::GpuModel>(*ctx_, parts);
         scene::Model glow = build_brake_glow(bin, rec, right);
         if (!glow.meshes.empty()) glows_[size_t(i)] = std::make_unique<render::GpuModel>(*ctx_, glow);
+        wheel_radius_[size_t(i)] = std::max({wheel_radius_[size_t(i)], render::model_origin_radius(parts),
+                                            render::model_origin_radius(glow)});
     }
 }
 
@@ -488,8 +495,22 @@ void CarVisual::set_shadow(const CarShadowParams& p) {
     }
 }
 
+bool CarVisual::body_visible(const sim::VehicleState& s, const sim::VehicleSetup& setup,
+                              const render::ViewFrustum& view) const {
+    const render::Mat4 world = car_matrix(s);
+    if (view.intersects_sphere((world * render::translate({0, body_lift(setup), 0})).transform_point({0, 0, 0}),
+                               body_radius_)) return true;
+    for (size_t i = 0; i < wheel_radius_.size(); ++i) {
+        render::Vec3 c = wheel_center_[i];
+        c.y = setup.wheels[i].rest_center.y + s.wheels[i].suspension - setup.wheels[i].static_suspension;
+        if (view.intersects_sphere(world.transform_point(c), wheel_radius_[i])) return true;
+    }
+    return false;
+}
+
 void CarVisual::add_items(std::vector<render::DrawItem>& items, const sim::VehicleState& s,
                           const sim::VehicleSetup& setup, const render::Vec3& eye, const CarLook& look) const {
+    render_profile::Scope prepare(render_profile::frame.car_prepare);
     float dist = render::length(render::Vec3{s.position.x, s.position.y, s.position.z} - eye);
     const int lod = car_lod(dist, lods_, full_detail_);
     if (shadow_params_.enabled && (shadow_[0] || shadow_[1])) {
@@ -539,6 +560,17 @@ void CarVisual::add_items(std::vector<render::DrawItem>& items, const sim::Vehic
                 shadow(shadow_[0].get(), bias * g * sh, look.shadow * shadow_params_.brightness); // > 1: blend clamps
             if (shadow_[2]) shadow(shadow_[2].get(), bias * g * flat, 1);
             if (shadow_[1]) shadow(shadow_[1].get(), bias * g * flat, 1);
+        }
+    }
+    // Keep shadows/headlamp pools above even if their emitting car is outside
+    // this view. Cull only before morph uploads and wheel/body preparation.
+    // Spin-blurred wheels require their per-frame screen history, so keep that
+    // optional path updating until its history is explicitly culled too.
+    if (look.visibility && !(look.wheels && look.wheels->blur)) {
+        if (render_profile::enabled) ++render_profile::frame.car_bodies_tested;
+        if (!body_visible(s, setup, *look.visibility)) {
+            if (render_profile::enabled) ++render_profile::frame.car_bodies_skipped;
+            return;
         }
     }
     add_body_items(items, s, setup, look, {}, lod, true);

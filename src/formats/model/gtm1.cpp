@@ -1347,6 +1347,20 @@ std::vector<scene::Mesh> MorphDraws::meshes(const std::array<float, 5>& values) 
     return {std::move(mesh)};
 }
 
+float MorphDraws::bounding_radius() const {
+    float radius = 0;
+    for (const Entry& e : draws_)
+        for (const Part& p : e.chunks)
+            for (const auto* key : {&p.key0, &p.key1})
+                for (scene::Vertex v : *key) {
+                    if (e.has_matrix) place_vertex(e.matrix, v);
+                    const float d = std::sqrt(v.pos[0]*v.pos[0] + v.pos[1]*v.pos[1] + v.pos[2]*v.pos[2]);
+                    if (!std::isfinite(d)) return INFINITY;
+                    radius = std::max(radius, d);
+                }
+    return radius;
+}
+
 void MorphDraws::rebase_textures(int base) {
     for (Entry& e : draws_)
         for (Part& p : e.chunks)

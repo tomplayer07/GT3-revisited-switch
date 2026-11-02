@@ -354,6 +354,9 @@ public:
     // The draws for the callback values `values` (ids 1-5): one mesh ("morph", Mesh::lod = the
     // LOD built), in model space.
     std::vector<scene::Mesh> meshes(const std::array<float, 5>& values) const;
+    // Model-origin radius over every chunk and both keys (including intermediate
+    // chunks which need not lie between the callback's first and last poses).
+    float bounding_radius() const;
     // Adds `base` to the parts' texture indices (their model's textures appended to others).
     void rebase_textures(int base);
     // The texture indices the parts use, ascending; and renumbering them (t -> map[t]).

@@ -72,7 +72,7 @@ void log_message(LogLevel level, const char* fmt, ...) {
     case LogLevel::Error: prio = SDL_LOG_PRIORITY_ERROR; break;
     }
     const bool diagnostic = std::strncmp(buf, "SWPERF:", 7) == 0 || std::strncmp(buf, "SWDETAIL:", 9) == 0 ||
-                            std::strncmp(buf, "Race perf [", 11) == 0;
+                            std::strncmp(buf, "SWCULL:", 7) == 0 || std::strncmp(buf, "Race perf [", 11) == 0;
     if (diagnostic && level < LogLevel::Warn) {
         std::lock_guard lock(diagnostic_mutex);
         if (defer_diagnostics) {

@@ -98,6 +98,10 @@ To help future contributors understand what has already been tried and where the
 
 ### Upstream 0.6.0 integration on Switch
 
+Switch Homebrew Menu version: **0.6.0**, aligned with the upstream engine version.
+This update enables staggered street-lamp visibility checks and early offscreen
+car body preparation culling by default, preserving the original lamp effects.
+
 The native Switch renderer retains the 0.4.0 fixes for car and prize reflections,
 car-lamp occlusion, decal depth and save overwrites, alongside upstream's new
 controls, demos, wheel/brake geometry, sparks and vertex-colour correction.
@@ -114,6 +118,34 @@ The native GLES shaders are generated from the shared GLSL sources:
 `python3 tools/switch/generate_gles_shaders.py` updates the committed header;
 add `--check` to verify it is current after an upstream shader change.
 
+### Early car body preparation
+
+On Switch, `[video] switch_car_body_cull = on` (default) skips body/morph and
+wheel preparation when conservative bounds are outside the current main view.
+Bounds include every LOD, every morph key and the current wheel positions.
+Lighting, projected shadows and headlamp pools are still prepared; mirror and
+wet-road views keep their existing paths. Enabling `wheel_spin_blur` bypasses
+this early cull to preserve the wheels' screen-space history.
+
+Set `switch_car_body_cull = off` and restart for the reference run with the same
+build. With `switch_profile = on`, `SWCULL` reports average body checks/skips and
+car preparation time per frame. FPS gains require console measurements.
+
+### Street lamp visibility optimization
+
+`switch_street_glow_interval = 2` staggers original street glow/halo occlusion
+checks across alternating frames. Geometry and colours still update every frame;
+only visibility can lag by one frame. Switch defaults to `2`; use `1` to check
+every frame for comparison.
+New/stale lamps, camera jumps over 4 m, rotations over 10 degrees per frame,
+projection changes and time gaps over 100 ms force fresh checks. Car lamps are
+unaffected. `SWDETAIL: street visibility` counts checks and reused results.
+
+On Switch, `[video] switch_street_glows = off` disables only street lamp
+halos/flares in the race picture. The default is `on`. Restart the game after
+changing it. Car lamp glows, road illumination and reflection-map lights are
+retained. With profiling enabled, `SWDETAIL: CPU lamp glows` separates street
+and car glow preparation time; these counters exclude GPU drawing time.
 ### Experimental night-track testing (October 31)
 
 This branch adds detailed Switch renderer profiling, deferred diagnostic logging,

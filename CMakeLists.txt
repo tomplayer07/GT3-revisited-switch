@@ -187,7 +187,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
   )
   # Homebrew Menu reads the title, author, version and icon from the optional NRO assets.
   # This is the Switch release number, independent from the upstream project's version.
-  set(GT3R_SWITCH_VERSION "0.4.0" CACHE STRING "Version displayed in the Switch Homebrew Menu")
+  set(GT3R_SWITCH_VERSION "0.6.0" CACHE STRING "Version displayed in the Switch Homebrew Menu")
   set(GT3R_SWITCH_NACP ${CMAKE_BINARY_DIR}/gt3r.nacp)
   add_custom_command(TARGET ${GT3R_APP_TARGET} POST_BUILD
     COMMAND nacptool --create "GT3 Revisited" "tomplayer07" "${GT3R_SWITCH_VERSION}" ${GT3R_SWITCH_NACP}

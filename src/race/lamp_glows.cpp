@@ -2,6 +2,7 @@
 #include "race/occluder.h"
 
 #include "base/log.h"
+#include "base/render_profile.h"
 #include "formats/ps2/vif.h"
 
 #include <algorithm>
@@ -198,6 +199,7 @@ const Flare::Mesh& Flare::disc_mesh() {
 // --- Course lamps -------------------------------------------------------------------
 
 void LampGlows::load(SDL_Renderer* r, render::GpuContext* gpu, ByteSpan g, ByteSpan env, ByteSpan vls0, ByteSpan flare) {
+    visibility_cache_.reset();
     lists_.clear();
     count_ = 0;
     if (env.size() < 0xE60 || std::memcmp(env.data(), "Env0", 4) != 0 || !(rd32(env, 0x10) & 0x200000)) return;
@@ -227,6 +229,7 @@ void LampGlows::load(SDL_Renderer* r, render::GpuContext* gpu, ByteSpan g, ByteS
         for (u32 k = 0; k < n && lp + 4 + 32ull * (k + 1) <= g.size(); ++k) {
             size_t o = lp + 4 + 32ull * k;
             Lamp l;
+            l.visibility_id = count_ + list.size();
             l.type = int(rd32(g, o) & 7);
             l.pos = {rdf(g, o + 4), rdf(g, o + 8), rdf(g, o + 12)};
             l.dir = {rdf(g, o + 16), rdf(g, o + 20), rdf(g, o + 24)};
@@ -257,6 +260,7 @@ void LampGlows::draw(SDL_Renderer* r, const SDL_FRect& rect, const render::Mat4&
 void LampGlows::add(render::ScreenBatch& b, const SDL_FRect& rect, const render::Mat4& view, const render::Vec3& eye,
                     const render::Frustum& fr, const Blocked& blocked) const {
     if (lists_.empty() || (flare_.empty() && !glow_.valid())) return;
+    visibility_cache_.begin(count_, visibility_interval_, eye, view, fr, time_);
     // The lamps the original keeps this frame: the lists of the nodes visible from the
     // camera, in that order (every list without visibility data), at most 100 that pass the
     // screen test, whether or not they face the camera.
@@ -317,7 +321,9 @@ void LampGlows::add(render::ScreenBatch& b, const SDL_FRect& rect, const render:
         if (ty.blink > 0) att *= 0.5f + 0.5f * float(std::sin(2 * 3.14159265 * (time_ / ty.blink + l.phase)));
         const float zp = z - 0.5f; // pulled 0.5 m towards the camera along the view ray
         if (facing && zp > 0) {
-            float vis = box_visibility(k.px, k.py, z, rect, fr, view, eye, blocked);
+            float vis = visibility_cache_.sample(l.visibility_id, 0, [&] {
+                return box_visibility(k.px, k.py, z, rect, fr, view, eye, blocked);
+            });
             const float c = ty.intensity * att * D;
             if (vis > 0 && !flare_.empty()) {
                 const float f = zp / z;
@@ -333,12 +339,18 @@ void LampGlows::add(render::ScreenBatch& b, const SDL_FRect& rect, const render:
         // here), colour x gain x 0.5 at full visibility, not scaled by D.
         if (ty.halo > 0 && ty.halo_gain > 0 && z > 1 && zp > 0) {
             float halo_r = ty.halo * fr.per_metre(zp, rect.h);
-            if (halo_r > 0.5f && !blocked(eye, eye + (l.pos - eye) * (zp / z))) {
+            if (halo_r > 0.5f && visibility_cache_.sample(l.visibility_id, 1, [&] {
+                    return blocked(eye, eye + (l.pos - eye) * (zp / z)) ? 0.0f : 1.0f;
+                }) > 0) {
                 const float c = ty.intensity * att * ty.halo_gain * 0.5f, f = zp / z;
                 Flare::add_mesh(Flare::disc_mesh(), b, fr, rect, k.v.x * f, k.v.y * f, zp, ty.halo, ty.halo,
                                 {ty.rgb[0] * c, ty.rgb[1] * c, ty.rgb[2] * c}, 1.0f);
             }
         }
+    }
+    if (render_profile::enabled) {
+        render_profile::frame.street_visibility_queries += visibility_cache_.queries;
+        render_profile::frame.street_visibility_reused += visibility_cache_.reused;
     }
 }
 

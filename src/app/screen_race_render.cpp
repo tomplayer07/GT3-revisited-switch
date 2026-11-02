@@ -257,6 +257,10 @@ TyreSmoke::View RaceScreen::smoke_view(const CameraRig& c, float aspect, float f
 void RaceScreen::collect_items(const render::Vec3& eye, const sim::Vec3& right, bool player,
                                bool second, const TyreSmoke::View& smoke_v, ItemsView view) {
     const bool mirror = view == ItemsView::Mirror;
+    std::optional<render::ViewFrustum> car_visibility;
+    if (car_body_cull_ && wheel_view_ && !mirror)
+        car_visibility.emplace(wheel_view_->proj * wheel_view_->view);
+    const render::ViewFrustum* visibility = car_visibility ? &*car_visibility : nullptr;
     item_lights_.clear();
     if (shadows_on_) {
         auto apply = [this](CarVisual* v) {
@@ -283,6 +287,7 @@ void RaceScreen::collect_items(const render::Vec3& eye, const sim::Vec3& right, 
     player_items_[0] = player_items_[1] = items_.size();
     if (player) {
         CarLook look = car_look(render_state_, true, 0);
+        look.visibility = visibility;
         look.lamp = brake_lamps_.factor(0); look.brake_now = brake_lamps_.now(0);
         car_visual_->add_items(items_, render_state_, vehicle_->setup(), eye, look);
         player_items_[1] = items_.size();
@@ -290,6 +295,7 @@ void RaceScreen::collect_items(const render::Vec3& eye, const sim::Vec3& right, 
     if (second && field_ && field_->has_second()) {
         const CarVisual* v2 = car2_visual_ ? car2_visual_.get() : car_visual_.get();
         CarLook look = car_look(render_state2_, false, 1);
+        look.visibility = visibility;
         look.lamp = brake_lamps_.factor(1); look.brake_now = brake_lamps_.now(1);
         v2->add_items(items_, render_state2_, field_->second_setup(), eye, look);
     }
@@ -299,6 +305,7 @@ void RaceScreen::collect_items(const render::Vec3& eye, const sim::Vec3& right, 
             {
                 sim::VehicleState os = interpolate(f->opponent_prev_state(i), f->opponent_state(i), step_.alpha());
                 CarLook look = car_look(os, false, 2 + size_t(i));
+                look.visibility = visibility;
                 look.lamp = brake_lamps_.factor(2 + size_t(i)); look.brake_now = brake_lamps_.now(2 + size_t(i));
                 size_t first = items_.size();
                 opp_visuals_[size_t(i)]->add_items(items_, os, f->opponent_setup(i), eye, look);
@@ -315,6 +322,7 @@ void RaceScreen::collect_items(const render::Vec3& eye, const sim::Vec3& right, 
     auto add_ghost = [&](const sim::VehicleSetup& su) {
         size_t first = items_.size();
         CarLook ghost_look;
+        ghost_look.visibility = visibility;
         ghost_look.instance = 1; // its own morph geometry (the car's is drawn this frame too)
         ghost_look.wheels = wheel_view_, ghost_look.wheel_track = &ghost_wheel_track_;
         car_visual_->add_items(items_, gs, su, eye, ghost_look);
@@ -655,8 +663,14 @@ void RaceScreen::add_screen_passes(render::DrawOptions& o, const SDL_FRect& rect
         auto occl = [this](const render::Vec3& a, const render::Vec3& b) {
             return course_scene_ && course_scene_->occluder().segment_blocked(a, b);
         };
-        lamps_.add(ob, rect, cam.view(), eye, cam.fovy(), occl);
-        if (car_lamps_.active()) car_lamps_.add(ob, rect, cam.view(), eye, cam.fovy(), lamp_cars(), occl);
+        if (street_glows_) {
+            render_profile::Scope timing(render_profile::frame.street_glows);
+            lamps_.add(ob, rect, cam.view(), eye, cam.fovy(), occl);
+        }
+        if (car_lamps_.active()) {
+            render_profile::Scope timing(render_profile::frame.car_glows);
+            car_lamps_.add(ob, rect, cam.view(), eye, cam.fovy(), lamp_cars(), occl);
+        }
     }
     o.overlay = &ob;
     if (second || split) return; // the 2P halves: no haze, no vignette

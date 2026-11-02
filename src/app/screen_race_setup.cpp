@@ -33,6 +33,15 @@ void RaceScreen::start(App& app, const Replay* replay) {
     heat_haze_ = false; // native renderer: no scene-copy heat haze pass
     wheel_spin_blur_ = to_lower(app.config().get("video", "wheel_spin_blur").value_or("off")) == "on";
     LOG_INFO("Switch wheel spin blur: %s", wheel_spin_blur_ ? "on" : "off");
+    car_body_cull_ = to_lower(app.config().get("video", "switch_car_body_cull").value_or("on")) == "on";
+    LOG_INFO("Switch early car body culling: %s", car_body_cull_ ? "on" : "off");
+    const auto street_mode = to_lower(app.config().get("video", "switch_street_glows").value_or("on"));
+    street_glows_ = street_mode != "off";
+    LOG_INFO("Switch street lamp glows: %s (car lamps and illumination retained)",
+             street_glows_ ? "on" : "off");
+    const int glow_interval = app.config().get("video", "switch_street_glow_interval").value_or("2") == "1" ? 1 : 2;
+    lamps_.set_visibility_interval(glow_interval);
+    LOG_INFO("Switch street lamp visibility interval: %d frames", glow_interval);
 #endif
     // [video] original_res = on: the 3D scene at the PS2's 640x448 in a 4:3 frame,
     // upscaled with [video] original_filter = nearest (default) | bilinear.

@@ -701,6 +701,8 @@ private:
     bool shadows_on_ = true;  // [video] car_shadows
     bool full_car_detail_ = false; // [video] full_car_detail (CarVisual::set_full_detail)
     bool wheel_spin_blur_ = true; // native Switch: opt in with [video] wheel_spin_blur
+    bool car_body_cull_ = false; // Switch: skip body preparation outside the current view
+    bool street_glows_ = true; // Switch diagnostic: street lamp halos/flares only
     bool showroom_wheels_ = false; // [video] showroom_wheels (read_showroom)
     std::vector<render::DrawItem> env_items_;
     bool env_gt3_scene_ = false; // the map holds GT3's reflection scene: use GT3's lookup

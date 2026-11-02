@@ -15,7 +15,16 @@ struct Detail {
     size_t palette_pixels = 0, palette_skipped = 0;
     size_t texture_batches = 0, texture_batch_bytes = 0;
     double texture_stage = 0, texture_commands = 0;
+    double car_prepare = 0;
+    double street_glows = 0, car_glows = 0;
+    size_t street_visibility_queries = 0, street_visibility_reused = 0;
+    size_t car_bodies_tested = 0, car_bodies_skipped = 0;
     void add(const Detail& d) {
+        car_prepare += d.car_prepare;
+        street_glows += d.street_glows; car_glows += d.car_glows;
+        street_visibility_queries += d.street_visibility_queries;
+        street_visibility_reused += d.street_visibility_reused;
+        car_bodies_tested += d.car_bodies_tested; car_bodies_skipped += d.car_bodies_skipped;
         texture_batches += d.texture_batches; texture_batch_bytes += d.texture_batch_bytes;
         texture_stage += d.texture_stage; texture_commands += d.texture_commands;
         animations += d.animations; palettes += d.palettes; moving += d.moving;

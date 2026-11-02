@@ -201,6 +201,29 @@ TEST(gtm1_car_morph_draws_synthetic) {
     CHECK(m.meshes.size() == 2 && x1(m.meshes[0]) == 1 && none.empty());
 }
 
+TEST(gtm1_morph_bounds_include_intermediate_chunks) {
+    Bytes data = make_callback_gtm1();
+    data[0xA7] = 3; // three poses: near, far, near again
+    gtm1::Gtm1 g = gtm1::Gtm1::parse(data);
+    g.chunks.push_back(g.chunks.front());
+    gtm1::MorphDraws md;
+    gtm1::Options o;
+    o.run.callback = gtm1::kCarCallbackDefaults.data();
+    o.morphs = &md;
+    gtm1::build_model(g, o);
+    const float radius = md.bounding_radius();
+    CHECK(radius > 10); // the end poses alone would give a radius near 1
+    for (int step = 0; step <= 100; ++step) {
+        auto values = gtm1::kCarCallbackDefaults;
+        values[4] = float(step) / 100;
+        for (const scene::Mesh& m : md.meshes(values))
+            for (const scene::Vertex& v : m.vertices) {
+                const float r = std::sqrt(v.pos[0]*v.pos[0] + v.pos[1]*v.pos[1] + v.pos[2]*v.pos[2]);
+                CHECK(r <= radius + 0.001f);
+            }
+    }
+}
+
 TEST(gtm1_animated_nodes_synthetic) {
     Bytes data = make_animated_gtm1();
     gtm1::Gtm1 g = gtm1::Gtm1::parse(data);
@@ -490,6 +513,21 @@ TEST(car_morph_draws_disc) {
         std::string id = e.path.substr(e.path.rfind('/') + 1);
         found[id] = morphs[0].ids();
         draws[id] = morphs[0].size();
+        // The visibility bound must enclose every animated pose, not just the
+        // body's default pose (mud flaps, aerials and the driver's steering).
+        for (const gtm1::MorphDraws& md : morphs) {
+            const float radius = md.bounding_radius();
+            CHECK(std::isfinite(radius));
+            for (int step = 0; step <= 20; ++step) {
+                std::array<float, 5> values;
+                values.fill(float(step) / 20);
+                for (const scene::Mesh& mesh : md.meshes(values))
+                    for (const scene::Vertex& v : mesh.vertices) {
+                        const float r = std::sqrt(v.pos[0]*v.pos[0] + v.pos[1]*v.pos[1] + v.pos[2]*v.pos[2]);
+                        CHECK(r <= radius + 0.001f);
+                    }
+            }
+        }
         // The parts move with their value, and the body leaves them out.
         std::array<float, 5> lo{}, hi{1, 1, 1, 1, 1};
         std::vector<scene::Mesh> a = morphs[0].meshes(lo), b = morphs[0].meshes(hi);

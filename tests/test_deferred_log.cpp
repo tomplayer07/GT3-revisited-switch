@@ -30,6 +30,7 @@ TEST(log_deferred_diagnostics_flush_in_order) {
     LOG_INFO("SWPERF: first");
     LOG_INFO("SWDETAIL: second");
     LOG_INFO("Race perf [test]: third");
+    LOG_INFO("SWCULL: car preparation");
     CHECK(capture.messages.empty());
     LOG_INFO("ordinary message");
     LOG_WARN("SWDETAIL: warning remains immediate");
@@ -43,6 +44,8 @@ TEST(log_deferred_diagnostics_flush_in_order) {
     const auto third = block.find("Race perf [test]: third");
     CHECK(first != std::string::npos && second != std::string::npos && third != std::string::npos);
     CHECK(first < second && second < third);
+    const auto cull = block.find("SWCULL: car preparation");
+    CHECK(cull != std::string::npos && third < cull);
     LOG_INFO("SWPERF: fourth");
     CHECK(capture.messages.size() == 3);
     gt3r::log_defer_diagnostics(false);

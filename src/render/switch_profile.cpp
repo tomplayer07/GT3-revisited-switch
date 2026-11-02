@@ -134,6 +134,12 @@ void SwitchProfile::present(double frame_ms, double update_ms, double render_ms,
     LOG_INFO("SWDETAIL: texture PBO %.1f batches %.1f KiB/frame; CPU staging %.2f commands %.2f ms/frame",
              double(details_.texture_batches) / n, double(details_.texture_batch_bytes) / (1024 * n),
              details_.texture_stage / n, details_.texture_commands / n);
+    LOG_INFO("SWCULL: car preparation %.3f ms/frame; bodies tested %.1f skipped %.1f/frame (shadows retained)",
+             details_.car_prepare / n, double(details_.car_bodies_tested) / n, double(details_.car_bodies_skipped) / n);
+    LOG_INFO("SWDETAIL: CPU lamp glows street %.3f car %.3f ms/frame (preparation only)",
+             details_.street_glows / n, details_.car_glows / n);
+    LOG_INFO("SWDETAIL: street visibility %.1f checks %.1f reused/frame",
+             double(details_.street_visibility_queries) / n, double(details_.street_visibility_reused) / n);
     details_ = {};
     frames_ = late_ = gpu_samples_ = skipped_ = disjoints_ = 0;
     elapsed_ = update_ = render_ = present_ = max_frame_ = gpu_ms_ = gpu_max_ = 0;
