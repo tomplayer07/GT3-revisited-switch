@@ -1,5 +1,16 @@
 # Passaggio al nuovo modello — GT3 Revisited Switch
 
+**Integrazione core Deko in corso:** driver SDL, contratto immagini e
+allocatore ImageArray sono in `src/render/deko`. Confermati su Switch
+(log `/private/tmp/deko-core-images-run.log`, 5.245 frame, uscita pulita).
+Ora GpuModel e uploader nativo usano `render/model_geometry.*`; geometria
+comune con policy di merge originale per produzione e packet-order per
+Deko. Test host/ISO passano; questo nuovo percorso non è ancora stato
+caricato sulla console. GpuContext/View3D non sono ancora collegati al
+backend nativo. Conservare queste modifiche locali e distinguere gli
+ultimi test hardware dalla nuova implementazione CPU.
+
+
 **Aggiornamento 4 novembre — merge 0.6.1:** lavoro su `experiment-deko3d`,
 checkpoint locale `6ece111`, integrazione dei 19 commit upstream fino a
 `f8d8c7c`. Il difetto delle facciate è già risolto e il test a sei auto è

@@ -52,9 +52,10 @@ obj = out / 'SDL_render.o'
 subprocess.run(['aarch64-none-elf-gcc', *flags['C_DEFINES'], *flags['C_INCLUDES'],
                 '-I' + str(source / 'src/render'), *flags['C_FLAGS'],
                 '-c', str(patched), '-o', str(obj)], check=True)
-driver = Path(__file__).resolve().parent / 'SDL_render_deko.c'
+driver = Path(__file__).resolve().parents[3] / 'src/render/deko/SDL_render_deko.c'
 driver_obj = out / 'SDL_render_deko.o'
 subprocess.run(['aarch64-none-elf-gcc', *flags['C_DEFINES'], *flags['C_INCLUDES'],
+                '-I' + str(Path(__file__).resolve().parents[3] / 'src'),
                 *flags['C_FLAGS'], '-c', str(driver), '-o', str(driver_obj)], check=True)
 archive = out / 'libSDL3-deko.a'
 if archive == library:
@@ -67,6 +68,8 @@ manifest = {
     'input_library_sha256': hashlib.sha256(library.read_bytes()).hexdigest(),
     'original_render_object_sha256': hashlib.sha256(original).hexdigest(),
     'render_source_sha256': hashlib.sha256((source / 'src/render/SDL_render.c').read_bytes()).hexdigest(),
+    'deko_driver_sha256': hashlib.sha256(driver.read_bytes()).hexdigest(),
+    'deko_contract_sha256': hashlib.sha256((driver.parent / 'sdl_backend.h').read_bytes()).hexdigest(),
     'private_render_header_sha256': hashlib.sha256((source / 'src/render/SDL_sysrender.h').read_bytes()).hexdigest(),
     'output_library_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
     'status': 'SDL driver adapter built; application must provide GT3R_DekoBackend callbacks',

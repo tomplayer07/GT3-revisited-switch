@@ -6,6 +6,7 @@
 // index list per mesh for wireframe display.
 
 #include "render/gpu_context.h"
+#include "render/model_geometry.h"
 #include "render/math3d.h"
 #include "scene/model.h"
 #include "render/vertex_upload_cache.h"
@@ -60,25 +61,7 @@ public:
     const Geometry* geometry() const { return keep_ ? &geometry_ : nullptr; }
     void keep_geometry() { keep_ = true; }
 
-    struct MeshInfo {
-        Mat4 transform;
-        int lod = 0;
-        s32 vertex_offset = 0; // added to every index
-        u32 index_offset = 0;  // first triangle index in the shared buffer
-        u32 line_first = 0, line_count = 0;
-        std::vector<scene::Primitive> primitives; // first_index relative to index_offset
-        // Bounding sphere of the mesh's vertices in mesh space (before `transform`),
-        // used for frustum culling, draw distance and transparency sorting.
-        Vec3 center;
-        float radius = 0;
-        // Each primitive's own sphere (the vertices of its triangles), in the same space: the
-        // guard band's clipping skips the primitives it cannot cut (View3D::upload_clipped).
-        struct Sphere {
-            Vec3 center;
-            float radius = 0;
-        };
-        std::vector<Sphere> primitive_spheres; // parallel to `primitives`
-    };
+    using MeshInfo = ModelMeshInfo;
     struct TextureInfo {
         SDL_GPUTexture* texture = nullptr;
 #if defined(__SWITCH__)

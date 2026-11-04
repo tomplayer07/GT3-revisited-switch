@@ -20,6 +20,7 @@ public:
     bool toggle_overlay();
 #ifdef GT3R_DEKO_SDL
     GT3R_DekoBackend sdl_backend();
+    GT3R_DekoImage scene_image();
     bool toggle_materials();
     bool toggle_reflections();
     bool toggle_vertex_demo();

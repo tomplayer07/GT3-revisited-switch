@@ -11,6 +11,8 @@
 #include <cmath>
 
 #include "graphics.h"
+#include "render/deko/image_array.h"
+#include "render/deko/borrowed_image.h"
 #include "timing.h"
 #ifdef GT3R_DEKO_MODEL
 #include "../deko-model/model.h"
@@ -58,13 +60,10 @@ struct GraphicsState {
     DkQueue queue{};
     DkSwapchain swapchain{};
     DkCmdBuf commands{};
-    DkMemBlock imagesMemory{}, depthMemory{}, indexMemory{}, codeMemory{}, commandsMemory{};
+    DkMemBlock indexMemory{}, codeMemory{}, commandsMemory{};
     DkMemBlock textureMemory{}, uploadMemory{}, descriptorMemory{};
-    DkMemBlock sceneMemory{};
+    render::deko::ImageArray swapTargets, sceneTargets, depthTargets;
     DkImage texture{};
-    DkImage images[frames]{};
-    DkImage scenes[frames]{};
-    DkImage depths[frames]{};
     DkShader shaders[9]{};
 #ifdef GT3R_DEKO_MODEL
     std::unique_ptr<Model> model;
@@ -113,9 +112,11 @@ struct GraphicsState {
             if (memory) dkMemBlockDestroy(memory);
         }
     };
+    using BorrowedImage = render::deko::BorrowedImageLease;
     struct UiTexture {
         int w, h;
         bool target = false, borrowedScene = false;
+        std::shared_ptr<BorrowedImage> borrowedImage;
         std::vector<uint8_t> pixels;
         std::shared_ptr<UiImage> image;
     };
@@ -195,7 +196,9 @@ struct GraphicsState {
     void collect_ui_images() {
         for (unsigned slot = 0; slot < frames; ++slot) {
             if (uiInFlight[slot] && dkFenceWait(&uiFence[slot], 0) == DkResult_Success) {
-                uiFrameImages[slot].clear(); uiInFlight[slot] = false;
+                uiFrameImages[slot].clear();
+                uiFrameBorrowed[slot].clear();
+                uiInFlight[slot] = false;
             }
         }
         for (auto it = uiImages.begin(); it != uiImages.end();) {
@@ -215,6 +218,7 @@ struct GraphicsState {
         }
     }
     struct UiCommand {
+        std::shared_ptr<BorrowedImage> borrowedImage;
         std::shared_ptr<UiImage> texture, target;
         bool borrowedScene = false;
         SDL_ScaleMode scale = SDL_SCALEMODE_NEAREST;
@@ -225,6 +229,7 @@ struct GraphicsState {
         bool clipEnabled = false;
         SDL_BlendMode blend = SDL_BLENDMODE_NONE;
     };
+    std::vector<std::shared_ptr<BorrowedImage>> uiFrameBorrowed[frames];
     std::vector<UiCommand> uiCommands;
     std::shared_ptr<UiImage> uiCurrentTarget;
     DkCmdBuf uiBuffer[frames]{};
@@ -238,6 +243,7 @@ struct GraphicsState {
         if (uiInFlight[slot] && dkFenceWait(&uiFence[slot], -1) != DkResult_Success)
             throw "SDL UI command-memory fence wait failed";
         uiFrameImages[slot].clear();
+        uiFrameBorrowed[slot].clear();
         uiInFlight[slot] = false;
         collect_ui_images();
         dkCmdBufClear(uiBuffer[slot]);
@@ -275,7 +281,7 @@ struct GraphicsState {
         size_t triangle = 0;
         DkImage* previousTarget = nullptr;
         for (const auto& op : uiCommands) {
-            DkImage* destination = op.target ? &op.target->image : &images[slot];
+            DkImage* destination = op.target ? &op.target->image : swapTargets.image(slot);
             const int targetW = op.target ? op.target->w : int(width);
             const int targetH = op.target ? op.target->h : int(height);
             if (destination != previousTarget) {
@@ -316,14 +322,21 @@ struct GraphicsState {
                 blend.srcAlphaBlendFactor=DkBlendFactor_Zero; blend.dstAlphaBlendFactor=DkBlendFactor_One;
             }
             dkCmdBufBindBlendState(cmd, 0, &blend);
-            const DkResHandle handle = dkMakeTextureHandle(op.borrowedScene ? slot + 1 : (op.texture ? op.texture->descriptor : 0),
+            Uint32 descriptor = op.borrowedScene ? slot + 1 : (op.texture ? op.texture->descriptor : 0);
+            if (op.borrowedImage) {
+                const auto& image=op.borrowedImage->source;
+                if (!image.descriptor(image.userdata,slot,&descriptor) || descriptor>=descriptorCount)
+                    throw "Borrowed image descriptor unavailable";
+                uiFrameBorrowed[slot].push_back(op.borrowedImage);
+            }
+            const DkResHandle handle = dkMakeTextureHandle(descriptor,
                 op.scale == SDL_SCALEMODE_LINEAR ? 1 : 0);
             dkCmdBufBindTextures(cmd, DkStage_Fragment, 0, &handle, 1);
             if (op.texture) uiFrameImages[slot].push_back(op.texture);
             for (size_t first = 0; first < op.vertices.size(); first += 3) {
                 if (triangle >= uiCapacity[slot] / 256) throw "SDL UI uniform pool exhausted";
                 float values[28]{};
-                values[24] = (op.texture || op.borrowedScene) ? 1.0f : 0.0f;
+                values[24] = (op.texture || op.borrowedScene || op.borrowedImage) ? 1.0f : 0.0f;
                 for (unsigned v = 0; v < 3; ++v) {
                     const auto& vertex = op.vertices[first + v];
                     values[v * 4] = 2 * (vertex.x + op.viewport.x) / targetW - 1;
@@ -369,7 +382,13 @@ struct GraphicsState {
                 texture->w = w; texture->h = h;
                 texture->target = access == SDL_TEXTUREACCESS_TARGET;
                 texture->borrowedScene = SDL_GetBooleanProperty(props, GT3R_DEKO_BORROW_SCENE_PROPERTY, false);
-                if (texture->borrowedScene) {
+                const auto* image=static_cast<const GT3R_DekoImage*>(SDL_GetPointerProperty(props,GT3R_DEKO_BORROW_IMAGE_PROPERTY,nullptr));
+                if (image) {
+                    if (texture->borrowedScene || access!=SDL_TEXTUREACCESS_STATIC)
+                        return SDL_SetError("Deko SDL: borrowed image requires static access");
+                    texture->borrowedImage=BorrowedImage::acquire(*image,state,w,h);
+                    if (!texture->borrowedImage) return false;
+                } else if (texture->borrowedScene) {
                     if (access != SDL_TEXTUREACCESS_STATIC || w != int(width) || h != int(height))
                         return SDL_SetError("Deko SDL: invalid borrowed scene dimensions/access");
                 } else {
@@ -383,7 +402,7 @@ struct GraphicsState {
         result.update_texture = [](void* state, void* object, const SDL_Rect* rect, const void* pixels, int pitch) {
             auto& self = *static_cast<GraphicsState*>(state);
             auto& texture = *static_cast<UiTexture*>(object);
-            if (texture.borrowedScene) return SDL_SetError("Deko SDL: borrowed scene cannot be CPU-updated");
+            if (texture.borrowedScene || texture.borrowedImage) return SDL_SetError("Deko SDL: borrowed scene cannot be CPU-updated");
             if (texture.target) return SDL_SetError("Deko SDL: use rendering commands to update render targets");
             if (!pixels || pitch < rect->w * 4 || rect->x < 0 || rect->y < 0 ||
                 rect->w <= 0 || rect->h <= 0 || rect->x + rect->w > texture.w || rect->y + rect->h > texture.h)
@@ -426,7 +445,7 @@ struct GraphicsState {
             op.target = static_cast<GraphicsState*>(state)->uiCurrentTarget;
             if (texture) {
                 const auto& source = *static_cast<UiTexture*>(texture);
-                op.texture = source.image; op.borrowedScene = source.borrowedScene;
+                op.texture = source.image; op.borrowedScene = source.borrowedScene; op.borrowedImage = source.borrowedImage;
             }
             if (op.texture && op.texture == op.target) return SDL_SetError("Deko SDL: cannot sample the active render target");
             op.scale = scale;
@@ -482,6 +501,7 @@ struct GraphicsState {
             }
             uiCommands.clear(); uiCurrentTarget.reset(); uiTextures.clear();
             for (auto& refs : uiFrameImages) refs.clear();
+            for (auto& refs : uiFrameBorrowed) refs.clear();
             uiImages.clear();
 #endif
             dkQueueDestroy(queue);
@@ -497,13 +517,13 @@ struct GraphicsState {
         if (swapchain) dkSwapchainDestroy(swapchain);
         if (commandsMemory) dkMemBlockDestroy(commandsMemory);
         if (codeMemory) dkMemBlockDestroy(codeMemory);
-        if (imagesMemory) dkMemBlockDestroy(imagesMemory);
-        if (depthMemory) dkMemBlockDestroy(depthMemory);
+        swapTargets.reset();
+        depthTargets.reset();
         if (indexMemory) dkMemBlockDestroy(indexMemory);
         if (textureMemory) dkMemBlockDestroy(textureMemory);
         if (uploadMemory) dkMemBlockDestroy(uploadMemory);
         if (descriptorMemory) dkMemBlockDestroy(descriptorMemory);
-        if (sceneMemory) dkMemBlockDestroy(sceneMemory);
+        sceneTargets.reset();
         if (device) dkDeviceDestroy(device);
     }
     DkMemBlock allocate(uint32_t size, uint32_t flags) {
@@ -540,20 +560,11 @@ struct GraphicsState {
         if (!device) throw "Device creation failed";
         trace("device created");
         DkImageLayoutMaker lm;
-        dkImageLayoutMakerDefaults(&lm, device);
-        lm.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent | DkImageFlags_HwCompression;
-        lm.format = DkImageFormat_RGBA8_Unorm;
-        lm.dimensions[0] = width; lm.dimensions[1] = height;
         DkImageLayout layout;
-        dkImageLayoutInitialize(&layout, &lm);
-        const uint32_t align = dkImageLayoutGetAlignment(&layout);
-        const uint32_t stride = (dkImageLayoutGetSize(&layout) + align - 1) & ~(align - 1);
-        imagesMemory = allocate(frames * stride, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
+        swapTargets.create(device,width,height,frames,DkImageFormat_RGBA8_Unorm,
+            DkImageFlags_UsageRender|DkImageFlags_UsagePresent|DkImageFlags_HwCompression);
         const DkImage* swapImages[frames];
-        for (unsigned i = 0; i < frames; ++i) {
-            dkImageInitialize(&images[i], &layout, imagesMemory, i * stride);
-            swapImages[i] = &images[i];
-        }
+        for (unsigned i=0;i<frames;++i) swapImages[i]=swapTargets.image(i);
         DkSwapchainMaker sm;
         dkSwapchainMakerDefaults(&sm, device, nwindowGetDefault(), swapImages, frames);
         swapchain = dkSwapchainCreate(&sm);
@@ -561,22 +572,16 @@ struct GraphicsState {
         trace("swapchain created");
         // Each swapchain slot owns a separate sampled scene target. There is no
         // CPU image copy and no resource mutation while GPU work is in flight.
-        lm.flags = DkImageFlags_UsageRender;
-        dkImageLayoutInitialize(&layout, &lm);
-        const uint32_t sceneAlign = dkImageLayoutGetAlignment(&layout);
-        const uint32_t sceneStride = (dkImageLayoutGetSize(&layout) + sceneAlign - 1) & ~(sceneAlign - 1);
-        sceneMemory = allocate(frames * sceneStride, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
-        for (unsigned i = 0; i < frames; ++i)
-            dkImageInitialize(&scenes[i], &layout, sceneMemory, i * sceneStride);
-        // Match the game's reversed depth convention: clear 0, larger Z is nearer.
-        lm.flags = DkImageFlags_UsageRender;
-        lm.format = DkImageFormat_Z24X8;
-        dkImageLayoutInitialize(&layout, &lm);
-        const uint32_t depthAlign = dkImageLayoutGetAlignment(&layout);
-        const uint32_t depthStride = (dkImageLayoutGetSize(&layout) + depthAlign - 1) & ~(depthAlign - 1);
-        depthMemory = allocate(frames * depthStride, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
-        for (unsigned i = 0; i < frames; ++i)
-            dkImageInitialize(&depths[i], &layout, depthMemory, i * depthStride);
+        sceneTargets.create(device,width,height,frames,DkImageFormat_RGBA8_Unorm);
+        // Preserve the validated reversed-depth format during extraction.
+        depthTargets.create(device,width,height,frames,DkImageFormat_Z24X8);
+        char imageSummary[256];
+        std::snprintf(imageSummary,sizeof(imageSummary),
+            "Native targets: size=%ux%u slots=%u swap_bytes=%llu scene_bytes=%llu depth_bytes=%llu",
+            sceneTargets.width(),sceneTargets.height(),unsigned(sceneTargets.count()),
+            (unsigned long long)swapTargets.bytes(),(unsigned long long)sceneTargets.bytes(),
+            (unsigned long long)depthTargets.bytes());
+        trace(imageSummary);
         indexMemory = allocate(DK_MEMBLOCK_ALIGNMENT, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
         // Non-sequential vertex IDs exercise the actual index buffer.
         const uint16_t indices[]{2, 0, 1, 5, 3, 4, 6, 7, 8, 8, 7, 9};
@@ -653,7 +658,7 @@ struct GraphicsState {
         std::memcpy(descriptors, &imageDescriptor, sizeof(imageDescriptor));
         for (unsigned i = 0; i < frames; ++i) {
             DkImageView sceneView;
-            dkImageViewDefaults(&sceneView, &scenes[i]);
+            dkImageViewDefaults(&sceneView, sceneTargets.image(i));
             dkImageDescriptorInitialize(&imageDescriptor, &sceneView, false, false);
             std::memcpy(descriptors + (i + 1) * sizeof(imageDescriptor), &imageDescriptor, sizeof(imageDescriptor));
         }
@@ -672,8 +677,8 @@ struct GraphicsState {
         for (unsigned i = 0; i < frames; ++i) {
             DkImageView view;
             DkImageView depthView;
-            dkImageViewDefaults(&view, &scenes[i]);
-            dkImageViewDefaults(&depthView, &depths[i]);
+            dkImageViewDefaults(&view, sceneTargets.image(i));
+            dkImageViewDefaults(&depthView, depthTargets.image(i));
             dkCmdBufBindRenderTarget(commands, &view, &depthView);
             bind[i] = dkCmdBufFinishList(commands);
         }
@@ -726,7 +731,7 @@ struct GraphicsState {
             // cache before reading that render target through the sampler.
             dkCmdBufBarrier(commands, DkBarrier_Fragments, DkInvalidateFlags_Image);
             DkImageView target;
-            dkImageViewDefaults(&target, &images[i]);
+            dkImageViewDefaults(&target, swapTargets.image(i));
             dkCmdBufBindRenderTarget(commands, &target, nullptr);
             dkCmdBufClearColorFloat(commands, 0, DkColorMask_RGBA, 0.12f, 0.03f, 0.18f, 1);
             dkCmdBufSetViewports(commands, 0, &viewport, 1);
@@ -1069,6 +1074,11 @@ bool Graphics::toggle_materials() {
 #endif
 }
 GT3R_DekoBackend Graphics::sdl_backend() { return impl_->backend(); }
+GT3R_DekoImage Graphics::scene_image() {
+    return {GT3R_DEKO_IMAGE_VERSION,impl_.get(),impl_.get(),int(width),int(height),
+        [](void*) {}, [](void*) {}, // context outlives renderer and frame fences
+        [](void*,unsigned slot,Uint32* descriptor) { if(slot>=frames)return false; *descriptor=slot+1; return true; }};
+}
 #endif
 bool Graphics::toggle_overlay() {
     impl_->showOverlay = !impl_->showOverlay;

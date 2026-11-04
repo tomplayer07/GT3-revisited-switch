@@ -16,7 +16,7 @@ struct SceneOptions {
     bool captureEnvironment=false;
     std::array<float,4> camera{}; // XYZ and yaw
     std::vector<WheelBinding> wheels; // optional per-mesh wheel ownership
-    std::vector<uint8_t> meshRoles; // 0 course, 1 base car, 2 backdrop, 3 brake car, 4 camera-centred sky (runtime only)
+    std::vector<uint8_t> meshRoles; // optional: empty means ordinary meshes; 0 course, 1 base car, 2 backdrop, 3 brake car, 4 camera-centred sky (runtime only)
 };
 // Borrows device/queue/shaders; destroy before their owner.
 class Model {
@@ -24,7 +24,7 @@ public:
     Model(DkDevice device, DkQueue queue, const DkShader* vertex, const DkShader* fragment, const DkShader* capture);
     ~Model();
     void load(const char* path, std::span<const uint8_t> course = {}); // diagnostic packet adapter
-    void load_scene(const scene::Model& model, const SceneOptions& options);
+    void load_scene(const scene::Model& model, const SceneOptions& options = {});
     void load_course_animations(std::span<const uint8_t> course);
     void prepare_dynamic_resources(); // loading phase only, before frame submission
     void configure_cars(unsigned count); // shared geometry, independent instance state

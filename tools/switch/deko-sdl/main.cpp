@@ -79,7 +79,8 @@ int main() {
         SDL_SetNumberProperty(sceneProps, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
         SDL_SetNumberProperty(sceneProps, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, 1280);
         SDL_SetNumberProperty(sceneProps, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, 720);
-        SDL_SetBooleanProperty(sceneProps, GT3R_DEKO_BORROW_SCENE_PROPERTY, true);
+        auto sceneImage = graphics.scene_image();
+        SDL_SetPointerProperty(sceneProps, GT3R_DEKO_BORROW_IMAGE_PROPERTY, &sceneImage);
         SDL_Texture* scenePreview = SDL_CreateTextureWithProperties(renderer, sceneProps);
         SDL_DestroyProperties(sceneProps);
         if (!scenePreview) throw SDL_GetError();

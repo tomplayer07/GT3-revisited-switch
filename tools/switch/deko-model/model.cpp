@@ -1,3 +1,4 @@
+#include "render/model_geometry.h"
 #include "model.h"
 #include "visibility.h"
 #include "wheel_pose.h"
@@ -418,7 +419,7 @@ struct Model::Impl {
     void load_scene(const scene::Model& source, const SceneOptions& options) {
         if (vertexMemory || !meshes.empty()) throw "Deko scene already uploaded";
         const auto begin=Clock::now();
-        if (source.meshes.empty() || source.meshes.size()>1024 || source.textures.size()>1024 || options.meshRoles.size()!=source.meshes.size()) throw "Invalid engine scene counts/roles";
+        if (source.meshes.empty() || source.meshes.size()>1024 || source.textures.size()>1024 || (!options.meshRoles.empty() && options.meshRoles.size()!=source.meshes.size())) throw "Invalid engine scene counts/roles";
         if (!options.wheels.empty() && options.wheels.size()!=source.meshes.size()) throw "Invalid wheel binding count";
         for (float v : options.camera) if (!std::isfinite(v)) throw "Invalid camera";
         freeCamera=options.freeCamera;
@@ -426,24 +427,45 @@ struct Model::Impl {
         initialVehicle.position={eyePosition.x+std::sin(yaw)*12,eyePosition.y-2,eyePosition.z+std::cos(yaw)*12};
         initialVehicle.orientation={std::cos(yaw*0.5f),0,std::sin(yaw*0.5f),0};
         vehicleBindPose=render::translate({initialVehicle.position.x,initialVehicle.position.y,initialVehicle.position.z})*render::rotate_y(yaw);
-        std::vector<Vertex> vertices; std::vector<uint32_t> indices;
+        // Use the same CPU geometry boundary as production GpuModel, preserving
+        // packet order for the native renderer's material passes.
+        uint64_t totalVertices=0,totalIndices=0,totalPrimitives=0;
+        for (const auto& mesh : source.meshes) {
+            totalVertices+=mesh.vertices.size(); totalIndices+=mesh.indices.size(); totalPrimitives+=mesh.primitives.size();
+            if (totalVertices>1000000 || totalIndices>3000000 || totalPrimitives>maxPrimitives)
+                throw "Engine scene exceeds Deko limits";
+            for (auto index:mesh.indices) if(index>=mesh.vertices.size()) throw "Invalid scene vertex index";
+            for (const auto& p:mesh.primitives)
+                if (uint64_t(p.first_index)+p.index_count>mesh.indices.size() || p.index_count%3 ||
+                    p.texture< -1 || (p.texture>=0 && size_t(p.texture)>=source.textures.size()))
+                    throw "Invalid engine primitive";
+        }
+        std::vector<scene::Vertex> preparedVertices;
+        std::vector<uint32_t> preparedIndices;
+        std::vector<render::ModelMeshInfo> preparedMeshes;
+        render::assemble_model_geometry(source.meshes,source.textures.size(),false,
+            preparedVertices,preparedIndices,preparedMeshes,false);
+        std::vector<Vertex> vertices;
+        auto indices=std::move(preparedIndices);
         render::Vec3 low{1e20f,1e20f,1e20f}, high{-1e20f,-1e20f,-1e20f};
         size_t meshNumber=0;
         for (const auto& input : source.meshes) {
-            if (vertices.size()+input.vertices.size()>1000000 || indices.size()+input.indices.size()>3000000 || primitives.size()+input.primitives.size()>maxPrimitives) throw "Engine scene exceeds Deko limits";
+            const auto& geometry=preparedMeshes[meshNumber];
             Mesh mesh; mesh.transform=render::Mat4::from(input.transform);
-            if (options.meshRoles[meshNumber]>4) throw "Invalid mesh role";
-            mesh.sky=options.meshRoles[meshNumber]==4;
-            mesh.car=options.meshRoles[meshNumber]==1 || options.meshRoles[meshNumber]==3; mesh.brakeVariant=options.meshRoles[meshNumber]==3; mesh.backdrop=options.meshRoles[meshNumber++]==2;
+            const unsigned role=options.meshRoles.empty() ? 0 : options.meshRoles[meshNumber];
+            if (role>4) throw "Invalid mesh role";
+            mesh.sky=role==4;
+            mesh.car=role==1 || role==3; mesh.brakeVariant=role==3; mesh.backdrop=role==2;
+            ++meshNumber;
             if (!options.wheels.empty()) mesh.wheel=options.wheels[meshNumber-1];
             if (mesh.wheel.index< -1 || mesh.wheel.index>3 || (mesh.wheel.index>=0 && !mesh.car) ||
                 !std::isfinite(mesh.wheel.center.x)||!std::isfinite(mesh.wheel.center.y)||!std::isfinite(mesh.wheel.center.z)) throw "Invalid scene wheel binding";
             hasWheelBindings|=mesh.wheel.index>=0;
             hasBrakeVariant|=mesh.brakeVariant;
-            mesh.vertexBase=uint32_t(vertices.size()); mesh.vertexCount=uint32_t(input.vertices.size()); mesh.firstPrimitive=uint32_t(primitives.size()); mesh.primitiveCount=uint32_t(input.primitives.size());
+            mesh.vertexBase=uint32_t(vertices.size()); mesh.vertexCount=uint32_t(input.vertices.size()); mesh.firstPrimitive=uint32_t(primitives.size()); mesh.primitiveCount=uint32_t(geometry.primitives.size());
             for (float v : input.transform) if (!std::isfinite(v)) throw "Invalid mesh transform";
             render::Vec3 localLow{1e20f,1e20f,1e20f},localHigh{-1e20f,-1e20f,-1e20f};
-            for (const auto& inputVertex : input.vertices) {
+            for (const auto& inputVertex : std::span<const scene::Vertex>(preparedVertices).subspan(size_t(geometry.vertex_offset),input.vertices.size())) {
                 Vertex v; std::memcpy(v.pos,inputVertex.pos,sizeof(v.pos)); std::memcpy(v.normal,inputVertex.normal,sizeof(v.normal)); std::memcpy(v.uv,inputVertex.uv,sizeof(v.uv)); v.rgba=inputVertex.color;
                 for (float x : v.pos) if (!std::isfinite(x)) throw "Invalid vertex position";
                 for (float x : v.normal) if (!std::isfinite(x)) throw "Invalid vertex normal";
@@ -459,10 +481,9 @@ struct Model::Impl {
                 vertices.push_back(v);
             }
             if (!input.vertices.empty()) mesh.bounds={(localLow+localHigh)*0.5f,(localHigh-localLow)*0.5f};
-            const auto indexBase=uint32_t(indices.size());
-            for (auto index : input.indices) { if (index>=input.vertices.size()) throw "Invalid scene vertex index"; indices.push_back(index); }
-            for (const auto& in : input.primitives) {
-                if (uint64_t(in.first_index)+in.index_count>input.indices.size() || in.index_count%3 || in.texture< -1 || (in.texture>=0 && size_t(in.texture)>=source.textures.size()) || !std::isfinite(in.alpha_ref)) throw "Invalid engine primitive";
+            const auto indexBase=geometry.index_offset;
+            for (const auto& in : geometry.primitives) {
+                if (uint64_t(in.first_index)+in.index_count>geometry.line_first || in.index_count%3 || in.texture< -1 || (in.texture>=0 && size_t(in.texture)>=source.textures.size()) || !std::isfinite(in.alpha_ref)) throw "Invalid engine primitive";
                 Primitive p; p.first=indexBase+in.first_index; p.count=in.index_count; p.texture=uint32_t(in.texture); p.flags=in.flags; p.alpha=in.alpha_ref;
                 for (unsigned k=0;k<3;++k) { p.material[k]=in.material.ambient[k]; p.material[4+k]=in.material.diffuse[k]; p.material[8+k]=in.material.specular[k]; p.material[12+k]=in.material.emission[k]; p.env[k]=in.env_c0[k]; p.env[4+k]=in.env_c1[k]; }
                 for (unsigned c=0;c<3;++c) { p.brakeEmission[c]=in.material.lamp_emission[c]; if (!std::isfinite(p.brakeEmission[c])) throw "Invalid brake emission"; }
@@ -474,6 +495,9 @@ struct Model::Impl {
             }
             meshes.push_back(mesh); originalTransforms.push_back(mesh.transform);
         }
+        preparedVertices.clear(); preparedVertices.shrink_to_fit();
+        preparedMeshes.clear(); preparedMeshes.shrink_to_fit();
+        trace("Native model uses shared GpuModel geometry preparation (packet order)");
         if (vertices.empty() || indices.empty() || primitives.empty()) throw "Empty engine scene";
         for (const auto& t : source.textures) if (!t.width || !t.height || t.width>4096 || t.height>4096 || uint64_t(t.width)*t.height!=t.rgba.size()) throw "Invalid engine texture";
         center=(low+high)*0.5f; radius=std::max(0.5f,render::length(high-low)*0.5f);

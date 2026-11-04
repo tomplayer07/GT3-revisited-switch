@@ -1803,3 +1803,119 @@ experimental branch; it was not installed or copied to the Desktop. Build
 reports unused desktop-dialog callback, existing snprintf range warnings
 and linker --end-group recovery; no errors. This is compile validation,
 not a hardware test of production GLES after the merge.
+
+
+### Post-merge hardware validation (4 November)
+
+User reports the scene looks correct after the merge. Retrieved log to
+/private/tmp/deko-061-hardware.log from 192.168.1.97. Run: 5,388 frames
+(about 90 seconds), six cars, clean shutdown. App loop 5,352 samples:
+mean 16.659 ms, p95 upper bin 17.50 ms, p99 18.50 ms, maximum 21.136 ms;
+zero retained/total slow loops above 25 ms. Native cadence mean 16.663 ms,
+maximum 21.137 ms, zero intervals above 33.33 ms. Previous six-car baseline
+was 16.662 ms app mean / 18.50 ms p99 / 34.402 ms maximum, with three
+loops above 25 ms (startup, initial capture and fog toggle). Comparable
+cadence, no evidence of a performance regression in this run; differences
+in route/traffic and startup prevent attributing improved maxima to merge.
+These are paced CPU wall timings, not GPU execution measurements; clocks
+are not queried (OC disabled is the user's continuing test baseline).
+
+All five AI remain active, with distinct positions/braking and peak speeds
+311.64–332.82 km/h. Reflections: 538 faces, zero busy skips. No model
+allocations after preparation; nine audited static textures have zero
+startup mismatches. Animated textures, moving nodes, wheels, brake emission
+and per-car lighting all update. Shutdown non_uniform=486 is the known
+grey texture pattern, not an error. Hardware confirmation covers this
+Route 5/six-Mazda prototype, not full GLES app or other cars/tracks.
+
+
+### Reusable SDL boundary and explicit borrowed images
+
+Driver implementation and versioned C contract now live under src/render/deko;
+tools retain compatibility includes. SDL archive preparation builds the shared
+driver and records driver/contract hashes, retaining its source/archive ABI check
+and AUDOUT patch.
+
+Added GT3R_DEKO_BORROW_IMAGE_PROPERTY with an explicit copied image contract:
+backend identity, logical dimensions, owner retain/release and per-frame
+descriptor lookup. Native image references remain alive across SDL texture
+destruction, queued draw recording and submitted GPU frames; frame references
+release after their UI fence. Legacy fixed scene property remains compatible.
+The demo's scene preview now exercises the new property (visible with A overlay).
+The provider still exports the same scene at 1280x720; arbitrary 3D view allocation
+and central descriptor/resource pools remain to implement. No claim of full-game
+integration yet.
+
+Two host tests validate owner/dimension/version/callback rejection and resource
+lifetime after property storage, texture and queued references are destroyed.
+Host tests and native Switch build pass. No hardware upload/test for this
+internal migration yet; preserve the installed hardware-validated merge build
+until the next complete milestone.
+
+
+### Shared native image allocation
+
+Added src/render/deko/image_array.h, an owning non-copyable image array with
+configurable dimensions, count, format and usage flags. Allocation uses layout
+alignment, checked 64-bit arithmetic, memblock alignment and ZeroFillInit.
+Explicit reset requires completed GPU use. The probe now uses this component
+for swapchain, scene colour and depth targets, preserving 1280x720/two slots,
+RGBA8 and Z24X8, including presentation compression. Context teardown waits
+for the queue, destroys swapchain, releases image arrays, then destroys device.
+Startup logs native target dimensions/count and allocation sizes.
+
+Native build passes. This is shared allocation infrastructure: full application
+routing and allocation of additional View3D views are still outstanding.
+Hardware validation of the extracted allocation and borrowed preview path is
+the next check; the new SDL preview is visible with A.
+
+Combined native-image allocation / borrowed-image NRO uploaded to
+192.168.1.97 and downloaded back byte-identical. Prior installed build saved
+as build-switch-deko-sdl/gt3r-before-core-images.nro. Desktop experimental
+copy updated. Packet assets unchanged; hardware test pending (drive and A
+overlay preview, then close normally and collect log).
+
+Shared-image hardware run: log retrieved as /private/tmp/deko-core-images-run.log.
+5,245 frames, clean shutdown. Native targets report 1280x720 / two slots,
+7,864,320 bytes each for swapchain, colour and depth arrays. SDL overlay
+toggled on/off twice, exercising the explicit borrowed-image preview path.
+No descriptor resolution errors logged. App loop mean 16.662 ms, p99 upper
+bin 18.75 ms, maximum 22.399 ms; no loops above 25 ms. Cadence mean
+16.664 ms, max 22.401 ms, zero intervals above 33.33 ms. Zero post-prepare
+model allocations, zero startup mismatches for nine audited textures, 524
+reflection faces and no busy skips. This supports stable operation after
+extraction; the log does not prove preview image correctness or leak-free
+repeated course changes. User reports test completed without describing
+visual artifacts. Generic View3D routing remains the next integration stage.
+
+
+### Shared production/native model geometry boundary
+
+Extracted CPU model assembly from gpu_model.cpp into render/model_geometry.*.
+GpuModel::MeshInfo aliases the backend-neutral ModelMeshInfo, preserving its
+existing callers. Production construction and dynamic geometry updates use
+the shared assembler with their previous merging/wireframe policy. Native
+load_scene now consumes the same assembled vertices, local indices and
+primitive metadata with merging disabled, preserving material packet order.
+Input limits/validation remain at the native boundary; temporary prepared
+vertices/metadata are released before GPU upload, and indices are moved.
+Also avoids u32 overflow when computing a primitive's input index range.
+
+Validation: native Switch build passes without warnings. Full host suite
+578 passed, 234 skipped, zero failures before adding the ISO regression.
+Four targeted geometry tests then pass with the real ISO, including exact
+primitive flags/texture/index/order comparison for am0006 and ma0095. Tests
+also cover original production merging, wire indices, bounds, invalid
+triangles, overflowing ranges and packet-order mode. Borrowed-image tests
+remain passing. This is shared CPU preparation used by both renderers, not
+yet a native implementation of GpuContext/View3D. Main-app routing remains
+unfinished. No new hardware upload for this internal step yet.
+
+The complete Switch GLES application compiles and generates its NRO after
+the shared-type extraction. Existing quick-menu snprintf warning and linker
+--end-group recovery remain; no errors. Production NRO was not installed.
+Native load_scene also accepts omitted mesh-role metadata (ordinary meshes
+by default), so an ordinary engine scene::Model no longer requires packet
+role annotations. Explicit role/wheel metadata continues to serve the
+existing hardware prototype. Live application device/view routing remains
+the next substantial integration, not an already completed capability.
