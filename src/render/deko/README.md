@@ -36,3 +36,9 @@ preparation in render/model_geometry.*. Native upload requests packet-order
 preservation; production retains its existing merge policy. This moves the
 CPU-side metadata out of the SDL_GPU-dependent class without pretending
 that native buffer/texture ownership is already routed through GpuContext.
+
+The game frontend now exposes `render/native_renderer.h`: GpuContext can adopt
+a native backend, GpuModel dispatches typed model resources and View3D::draw
+composites a backend-owned picture. Host tests use a synthetic software provider
+to verify this boundary. A concrete Deko NativeRenderer adapter, native texture
+bridge and application startup selection are NOT implemented yet.

@@ -16,6 +16,7 @@
 // nullptr and the app runs 2D-only.
 
 #include "base/bytes.h"
+#include "render/native_renderer.h"
 #include "render/switch_profile.h"
 #include "render/texture_upload_batch.h"
 #include "render/gpu_gles.h" // the OpenGL ES fallback (GT3R_GLES): routes the SDL_GPU calls
@@ -119,6 +120,9 @@ class GpuContext {
 public:
     // Creates the device, claims the window and creates the 2D renderer on it.
     static std::unique_ptr<GpuContext> create(SDL_Window* window, const GpuOptions& options);
+    // Adopts a shared native backend; its SDL renderer remains backend-owned.
+    static std::unique_ptr<GpuContext> adopt_native(std::shared_ptr<NativeRenderer> backend);
+    NativeRenderer* native_renderer() const { return native_.get(); }
     ~GpuContext();
     GpuContext(const GpuContext&) = delete;
     GpuContext& operator=(const GpuContext&) = delete;
@@ -131,7 +135,7 @@ public:
     const xr::Session::DeviceRequest& xr_request() const { return xr_request_; }
 #endif
 #if defined(__SWITCH__)
-    const char* driver_name() const { return "OpenGL ES 3.2 (Mesa Nouveau)"; }
+    const char* driver_name() const { return native_ ? native_->name() : "OpenGL ES 3.2 (Mesa Nouveau)"; }
     SwitchProfile& gl_profile() { return gl_profile_; }
     bool gl_freeze_textures() const { return gl_freeze_textures_; }
     bool gl_texture_rotate() const { return gl_texture_rotate_; }
@@ -148,7 +152,7 @@ public:
     GLuint gl_dummy_cube() const { return gl_dummy_cube_; }
     GLuint gl_vao() const { return gl_vao_; }
 #else
-    const char* driver_name() const { return SDL_GetGPUDeviceDriver(device_); }
+    const char* driver_name() const { return native_ ? native_->name() : SDL_GetGPUDeviceDriver(device_); }
 #endif
     // The OpenGL ES device (gpu_gles.h) rather than SDL_GPU's.
     bool gles() const { return gles_; }
@@ -226,6 +230,7 @@ private:
     bool open_sdl_gpu(SDL_Window* window, const GpuOptions& options);
     bool open_gles(SDL_Window* window, const GpuOptions& options);
 
+    std::shared_ptr<NativeRenderer> native_;
     SDL_GPUDevice* device_ = nullptr;
 #if defined(__SWITCH__)
     SwitchProfile gl_profile_;

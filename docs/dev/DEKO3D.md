@@ -1919,3 +1919,38 @@ by default), so an ordinary engine scene::Model no longer requires packet
 role annotations. Explicit role/wheel metadata continues to serve the
 existing hardware prototype. Live application device/view routing remains
 the next substantial integration, not an already completed capability.
+
+
+### Native frontend dispatch through the game's renderer classes
+
+Added backend-neutral NativeRenderer/NativeModel/NativeView contracts and
+GpuContext::adopt_native(shared backend). Backend owns the SDL renderer; context
+holds it alive without constructing or destroying a GL/SDL_GPU device. GpuModel
+can upload/update/share native models through typed ownership rather than casting
+Deko resources to SDL handles. Failed vertex updates preserve kept CPU geometry;
+texture sharing across different backend owners is rejected. View3D::draw can
+create a native view and composite its borrowed top-left SDL picture, including
+logical/fixed target sizing and composite alpha. Backend must retain immutable
+image versions until queued UI and GPU use complete.
+
+Scope: this is the frontend adoption/dispatch route, not yet a concrete Deko
+NativeRenderer implementation or an app startup selection. Native shader/pipeline
+requests and legacy offscreen/environment SDL_GPU texture paths reject unsupported
+use explicitly rather than falling into GL. Native adoption advertises one sample
+and no anisotropy for now. Typed texture interop for SpriteTexture, showroom sphere
+maps, offscreen/reflection paths remains outstanding. Keep application startup on
+GLES until that backend/resource bridge exists. The standalone probe still uses
+its existing direct Deko presentation path.
+
+Host integration test adopts a software-backed synthetic native provider with
+no SDL_GPU device: model upload/update/failure, dynamic shared geometry, cross-owner
+rejection, view composition with asymmetric top/bottom colours, fixed dimensions,
+unsupported offscreen rejection and destruction/SDL renderer ownership all pass.
+Nearest sampling makes the tiny test image's pixel assertions deterministic.
+Full host suite: 579 passed, 235 skipped, zero failures. These are dispatch and
+ownership checks, not hardware Deko rendering of the actual application. No new
+hardware upload is warranted until a concrete native view milestone is ready.
+
+Final same-source Switch verification passes for both standalone Deko NRO and
+the complete GLES app. Existing linker --end-group recovery remains. Neither
+artifact was uploaded or copied to the Desktop in this frontend-only step.

@@ -61,8 +61,18 @@ GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model, bool keep_geometr
     : ctx_(&ctx), device_(ctx.device()), keep_(keep_geometry) {
     std::vector<scene::Vertex> vertices;
     std::vector<u32> indices;
-    assemble_model_geometry(model.meshes, model.textures.size(), true, vertices, indices, meshes_);
+    assemble_model_geometry(model.meshes, model.textures.size(), true, vertices, indices, meshes_, !ctx.native_renderer());
     vertex_count_ = vertices.size();
+    if (auto* backend=ctx.native_renderer()) {
+        native_=backend->upload_model(model);
+        if (keep_) geometry_={std::move(vertices),std::move(indices)};
+        for (const auto& t:model.textures) {
+            TextureInfo info; info.width=t.width; info.height=t.height;
+            info.clamp_u=t.clamp_u; info.clamp_v=t.clamp_v; info.no_mips=t.no_mips;
+            textures_.push_back(info);
+        }
+        return;
+    }
     Uploader up(device_);
     if (!vertices.empty() && !indices.empty()) {
         vertices_ = up.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(), u32(vertices.size() * sizeof(scene::Vertex)));
@@ -137,6 +147,11 @@ bool GpuModel::stage(const Upload* uploads, int count) {
 }
 
 bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
+    if (ctx_->native_renderer()) {
+        if (!native_ || all.size()!=vertex_count_ || !native_->update_vertices(all)) return false;
+        if (keep_) geometry_.vertices=all;
+        return true;
+    }
     if (!vertices_ || all.size() != vertex_count_) return false;
 #if defined(__SWITCH__)
     if (uploaded_vertices_.matches(all)) {
@@ -155,6 +170,7 @@ bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
 }
 
 bool GpuModel::update_textures(const std::vector<TextureUpdate>& updates) {
+    if (ctx_->native_renderer()) return native_ && native_->update_textures(updates);
 #if defined(__SWITCH__)
     // Diagnostic isolation: keep the initial images, while CPU palette animation,
     // moving geometry, lighting and simulation continue. Not a quality preset.
@@ -219,9 +235,26 @@ bool GpuModel::update_textures(const std::vector<TextureUpdate>& updates) {
 }
 
 GpuModel::GpuModel(GpuContext& ctx, const GpuModel& textures)
-    : ctx_(&ctx), device_(ctx.device()), texture_source_(&textures) {}
+    : ctx_(&ctx), device_(ctx.device()), texture_source_(&textures) {
+    if (auto* backend=ctx.native_renderer(); backend && textures.native_model()) {
+        if (backend!=textures.ctx_->native_renderer()) {
+            SDL_SetError("Cannot share native model textures across backends");
+            return;
+        }
+        native_=backend->share_model_textures(*textures.native_model());
+    }
+}
 
 bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
+    if (ctx_->native_renderer()) {
+        if (!native_ || !native_->update_geometry(meshes)) return false;
+        std::vector<scene::Vertex> vertices; std::vector<u32> indices;
+        std::vector<MeshInfo> info;
+        assemble_model_geometry(meshes,textures().size(),false,vertices,indices,info,false);
+        vertex_count_=vertices.size(); meshes_=std::move(info);
+        if (keep_) geometry_={std::move(vertices),std::move(indices)};
+        return true;
+    }
     std::vector<scene::Vertex> vertices;
     std::vector<u32> indices;
     meshes_.clear();
@@ -265,6 +298,7 @@ bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
 }
 
 GpuModel::~GpuModel() {
+    if (ctx_->native_renderer()) { native_.reset(); return; }
 #if defined(__SWITCH__)
     GLuint v = (GLuint)(uintptr_t)vertices_;
     if (v) glDeleteBuffers(1, &v);

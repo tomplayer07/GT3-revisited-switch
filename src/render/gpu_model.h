@@ -35,7 +35,8 @@ public:
     GpuModel(const GpuModel&) = delete;
     GpuModel& operator=(const GpuModel&) = delete;
 
-    bool valid() const { return vertices_ != nullptr && indices_ != nullptr; }
+    bool valid() const { return ctx_->native_renderer() ? native_ && native_->valid() : vertices_ != nullptr && indices_ != nullptr; }
+    NativeModel* native_model() const { return native_.get(); }
     // Rewrites the vertex buffer (same layout and count as at construction, meshes in
     // order), e.g. camera-facing billboards. Returns false on a size mismatch.
     bool update_vertices(const std::vector<scene::Vertex>& all);
@@ -43,10 +44,7 @@ public:
     // mipmaps, e.g. textures recoloured by CLUT animations; a texture other models share
     // becomes this model's own first. Returns false when one is skipped (unknown index, size
     // mismatch) or the upload fails.
-    struct TextureUpdate {
-        size_t index = 0;
-        const std::vector<u32>* rgba = nullptr;
-    };
+    using TextureUpdate = ModelTextureUpdate;
     bool update_textures(const std::vector<TextureUpdate>& updates);
     // Replaces the geometry: the meshes and the vertex and index buffers (grown when needed);
     // no wireframe lines. E.g. the course's animated nodes, every frame.
@@ -87,6 +85,7 @@ private:
     // Copies the uploads into their buffers through staging_ in one command buffer.
     bool stage(const Upload* uploads, int count);
 
+    std::unique_ptr<NativeModel> native_;
     GpuContext* ctx_;
     SDL_GPUDevice* device_;
     SDL_GPUBuffer* vertices_ = nullptr;

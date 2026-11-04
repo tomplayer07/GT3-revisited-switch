@@ -35,6 +35,18 @@ bool gpu_renderer_supported() {
 #endif
 }
 
+std::unique_ptr<GpuContext> GpuContext::adopt_native(std::shared_ptr<NativeRenderer> backend) {
+    if (!backend || !backend->renderer2d()) {
+        SDL_SetError("Native renderer requires a valid SDL renderer");
+        return nullptr;
+    }
+    std::unique_ptr<GpuContext> ctx(new GpuContext());
+    ctx->renderer_=backend->renderer2d();
+    ctx->anisotropy_=false;
+    ctx->native_=std::move(backend);
+    return ctx;
+}
+
 std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, const GpuOptions& options) {
 #if defined(__SWITCH__)
     std::unique_ptr<GpuContext> ctx(new GpuContext());
@@ -337,6 +349,7 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
 }
 
 GpuContext::~GpuContext() {
+    if (native_) { renderer_=nullptr; native_.reset(); return; }
 #if defined(__SWITCH__)
     gl_profile_.release();
     if (gl_texture_pbo_) glDeleteBuffers(1, &gl_texture_pbo_);
@@ -380,6 +393,7 @@ SDL_GPUShader* GpuContext::make_shader(Stage stage) {
 
 SDL_GPUShader* GpuContext::create_shader(const ShaderCode& code, bool vertex, Uint32 samplers,
                                          Uint32 uniform_buffers) {
+    if (native_) { SDL_SetError("Native shaders belong to the native backend"); return nullptr; }
     SDL_GPUShaderCreateInfo info{};
     SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device_);
     SDL_PropertiesID props = 0;
@@ -452,6 +466,7 @@ void GpuContext::release_samplers() {
 }
 
 void GpuContext::set_anisotropy(int level) {
+    if (native_) return;
     level = level >= 16 ? 16 : level >= 8 ? 8 : level >= 4 ? 4 : level >= 2 ? 2 : 1;
     if (level == aniso_level_) return;
     const int before = aniso_level_;
@@ -480,6 +495,7 @@ bool GpuContext::msaa_supported(SDL_GPUSampleCount c) const {
 }
 
 std::vector<int> GpuContext::msaa_levels() const {
+    if (native_) return {1};
 #if defined(__SWITCH__)
     return {1};
 #else
@@ -491,6 +507,7 @@ std::vector<int> GpuContext::msaa_levels() const {
 }
 
 void GpuContext::set_msaa(int samples) {
+    if (native_) return;
     SDL_GPUSampleCount want = samples >= 8   ? SDL_GPU_SAMPLECOUNT_8
                               : samples >= 4 ? SDL_GPU_SAMPLECOUNT_4
                               : samples >= 2 ? SDL_GPU_SAMPLECOUNT_2
@@ -616,6 +633,7 @@ bool GpuContext::build_pipeline(const PipelineKey& key) {
 }
 
 SDL_GPUGraphicsPipeline* GpuContext::pipeline(const PipelineKey& key) {
+    if (native_) { SDL_SetError("Native pipelines belong to the native backend"); return nullptr; }
     {
         std::lock_guard lock(pipelines_mutex_);
         auto it = pipelines_.find(key);

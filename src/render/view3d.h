@@ -383,6 +383,7 @@ public:
     void capture_from_env();
 
 private:
+    std::unique_ptr<NativeView> native_;
     bool frame_alpha_written_ = false; // a DrawItem::frame_alpha pass wrote the target alpha this draw
     void capture_frame(SDL_GPUCommandBuffer* cmd);
     void write_capture();

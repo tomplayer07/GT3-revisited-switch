@@ -1,5 +1,15 @@
 # Passaggio al nuovo modello — GT3 Revisited Switch
 
+**Nuovo percorso frontend:** `render/native_renderer.h` e
+`GpuContext::adopt_native` permettono a GpuModel/View3D di inoltrare
+modelli e viste a un backend nativo tipizzato. Test con provider software
+sintetico e suite host passano (579/235 skipped). Non esiste ancora
+un'implementazione Deko3D di NativeRenderer: l'app non la seleziona,
+e texture/offscreen/riflessi devono ancora essere collegati. La demo
+hardware rimane sul percorso Deko diretto; nessun nuovo upload per
+questo passaggio frontend. Prossimo lavoro: adapter nativo concreto.
+
+
 **Integrazione core Deko in corso:** driver SDL, contratto immagini e
 allocatore ImageArray sono in `src/render/deko`. Confermati su Switch
 (log `/private/tmp/deko-core-images-run.log`, 5.245 frame, uscita pulita).

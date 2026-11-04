@@ -387,6 +387,7 @@ DofBlur dof_level_blur(int level) {
 }
 
 View3D::~View3D() {
+    if (ctx_.native_renderer()) { native_.reset(); return; }
     release_dof_levels();
     release_target();
     if (quad_vb_) SDL_ReleaseGPUBuffer(ctx_.device(), quad_vb_);
@@ -532,6 +533,26 @@ bool View3D::ensure_half(SDL_Renderer* renderer) {
 
 void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& view, const Mat4& proj, const Vec3& eye,
                   const std::vector<DrawItem>& items, const DrawOptions& opt) {
+    if (auto* backend=ctx_.native_renderer()) {
+        if (renderer!=ctx_.renderer2d()) { SDL_SetError("Native view renderer mismatch"); return; }
+        if (!(rect.w>0 && rect.h>0) || !std::isfinite(rect.w) || !std::isfinite(rect.h)) return;
+        float sx=1,sy=1; int lw=0,lh=0; SDL_RendererLogicalPresentation mode; SDL_FRect logical;
+        if (SDL_GetRenderLogicalPresentation(renderer,&lw,&lh,&mode) && lw>0 && lh>0 &&
+            SDL_GetRenderLogicalPresentationRect(renderer,&logical)) { sx=logical.w/lw; sy=logical.h/lh; }
+        const float scale=std::min(ctx_.render_scale(),1.0f);
+        const bool fixed=opt.fixed_width>0 && opt.fixed_height>0;
+        const int width=fixed ? opt.fixed_width : std::max(1,int(std::lround(rect.w*sx*scale)));
+        const int height=fixed ? opt.fixed_height : std::max(1,int(std::lround(rect.h*sy*scale)));
+        if (!native_) native_=backend->create_view();
+        if (!native_ || !SDL_FlushRenderer(renderer)) return;
+        auto* picture=native_->draw(width,height,view,proj,eye,items,opt);
+        if (!picture) { LOG_WARN("Native view draw failed: %s",SDL_GetError()); return; }
+        SDL_SetTextureBlendMode(picture,opt.clear[3]<1 || opt.composite_alpha<1 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+        SDL_SetTextureAlphaModFloat(picture,std::clamp(opt.composite_alpha,0.0f,1.0f));
+        SDL_RenderTexture(renderer,picture,nullptr,&rect);
+        SDL_SetTextureAlphaModFloat(picture,1);
+        return;
+    }
 #if defined(__SWITCH__)
     float sx = 1, sy = 1;
     int lw = 0, lh = 0;
@@ -1467,6 +1488,7 @@ void View3D::encode_dof(SDL_GPUCommandBuffer* cmd, const DrawOptions& o, const M
 
 bool View3D::draw_to(SDL_GPUTexture* target, int w, int h, const Mat4& view, const Mat4& proj, const Vec3& eye,
                      const std::vector<DrawItem>& items, const DrawOptions& opt) {
+    if (ctx_.native_renderer()) return SDL_SetError("Native draw_to requires native texture resources");
     if (!target || w <= 0 || h <= 0) return false;
     SDL_GPUDevice* dev = ctx_.device();
     Offscreen& o = direct_;
@@ -2197,6 +2219,7 @@ void View3D::release_offscreen() {
 
 SDL_GPUTexture* View3D::render_offscreen(int slot, int w, int h, const Mat4& view, const Mat4& proj, const Vec3& eye,
                                          const std::vector<DrawItem>& items, const DrawOptions& opt) {
+    if (ctx_.native_renderer()) { SDL_SetError("Native offscreen texture bridge is not implemented"); return nullptr; }
 #if defined(__SWITCH__)
     if (slot < 0 || slot >= 4 || w <= 0 || h <= 0) return nullptr;
     OffscreenGL& o = offscreen_gl_[slot];
@@ -2406,6 +2429,7 @@ bool View3D::ensure_cube(int size) {
 
 SDL_GPUTexture* View3D::render_env_cube(const Vec3& pos, const std::vector<DrawItem>& items, const DrawOptions& opt,
                                         int size, unsigned faces) {
+    if (ctx_.native_renderer()) { SDL_SetError("Native environment texture bridge is not implemented"); return nullptr; }
 #if defined(__SWITCH__)
     if (!ensure_cube(size)) return nullptr;
     GLint prev_fbo = 0, prev_prog = 0, prev_vao = 0, viewport[4];
