@@ -17,9 +17,10 @@ def convert(stage):
     direction = "out" if stage == "vert" else "in"
     source = re.sub(r"layout\(location = \d+\) " + direction + r"\b", direction, source)
     if stage == "vert":
-        needle = "    gl_Position = u.mvp * vec4(a_pos, 1.0);"
+        needle = "    v_color_in = u.fog.w > 0.0 ? color * gl_Position.w : color;"
         assert source.count(needle) == 1
-        source = source.replace(needle, needle + "\n    // SDL_GPU depth [0,1] -> OpenGL clip depth [-1,1].\n    gl_Position.z = gl_Position.z * 2.0 - gl_Position.w;")
+        source = source.replace(needle, "    // SDL_GPU depth [0,1] -> OpenGL clip depth [-1,1].\n    gl_Position.z = gl_Position.z * 2.0 - gl_Position.w;\n" + needle)
+        source = source.replace("gl_InstanceIndex", "gl_InstanceID")
     assert "layout(set" not in source
     return source
 

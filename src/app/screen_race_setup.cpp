@@ -177,6 +177,9 @@ void RaceScreen::start(App& app, const Replay* replay) {
             // The sun and its glare (Env0, slot 32).
             sun_.load(*app.vfs(), app.renderer(), app.gpu(), cf.section(*course, 32));
             if (app.gpu()) sun_disc_.load(*app.gpu(), sun_.params());
+            // GT3's far plane (Env0 +0x20); the projections reach to the backdrop's, 100 x as far.
+            const float far = sun_.params().has_env && !no_far_plane_ ? sun_.params().far_clip : 0.0f;
+            for (CameraRig* c : {&camera_, &camera2_}) c->set_gt3_far(far, CourseScene::kBackdropScale);
             wheel_env_ = WheelEnv::parse(cf.section(*course, 32)); // the wheels' blur and glow
             if (sun_.params().has_env && course_scene_) { // the course's own lit packets: its scene lights
                 render::ItemLights cl;
@@ -639,9 +642,11 @@ bool RaceScreen::build_vehicle(App& app) {
                                : sim::exact::Conductor::SinglePlayer;
         // The attract demo runs as GT3's does: the race's play kind 2 (the race passes it to the conductor's
         // race start as the race-flow byte; the race's exit(2) from the demo runner), so every car, slot 0 too,
-        // is a CPU car (control 2) with the event's overrides varied by grid slot, and no records. The test autopilot:
+        // is a CPU car (control 2) with the event's overrides varied by grid slot, and no records. So is the pre-race menu's
+        // race, with records off as well: no laps or time limit, so it races on (presentation §A8c). The test autopilot:
         // configuration 3, the race's AI drives the players' cars (the pads decoded).
-        o.config = attract_ ? 2 : preset_.autodrive ? 3 : 0;
+        o.config = attract_ || backdrop_ ? 2 : preset_.autodrive ? 3 : 0;
+        o.records_off = backdrop_;
         o.laps = race_laps_;
         if (two_player_) {
             o.second.car = launch_source2_.value_or(ExactCarSource{car2});

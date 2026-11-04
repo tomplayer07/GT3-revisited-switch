@@ -776,7 +776,7 @@ struct GraphicsState {
         if (!read) throw "Physics bundle read failed";
         trace("ExactRace initialization begin");
         physics=std::make_unique<Session>(physicsBytes,6);
-        model->load("sdmc:/switch/gt3r-deko-sdl-probe/route5-wheels.gtdk",physics->course_bytes());
+        model->load("sdmc:/switch/gt3r-deko-sdl-probe/route5-061.gtdk",physics->course_bytes());
         model->load_course_animations(physics->course_bytes());
         model->configure_cars(physics->car_count());
         model->prepare_dynamic_resources();
@@ -968,7 +968,7 @@ void Graphics::draw_street_glows(race::LampGlows& glows,SDL_Renderer* renderer) 
     if (!impl_->followCamera || !impl_->streetGlowsEnabled || !glows.count()) return;
     const SDL_FRect rect{float(width)*0.04f,float(height)*0.04f,float(width)*0.92f,float(height)*0.92f};
     render::ScreenBatch batch; batch.rect=rect;
-    glows.add(batch,rect,impl_->raceCamera.view(),impl_->raceCamera.eye(),impl_->raceCamera.fovy(),
+    glows.add(batch,rect,impl_->raceCamera.view(),impl_->raceCamera.eye(),impl_->raceCamera.frustum(rect.w/rect.h),
         [&](const render::Vec3& a,const render::Vec3& b){
             if (impl_->model->segment_blocked(a,b)) return true;
             for (unsigned car=0;car<impl_->physics->car_count();++car) {
@@ -996,7 +996,7 @@ void Graphics::draw_car_glows(race::CarLampGlows& glows,SDL_Renderer* renderer) 
     std::vector<race::CarLampGlows::Car> cars; cars.reserve(impl_->physics->car_count());
     for (unsigned car=0;car<impl_->physics->car_count();++car)
         cars.push_back({&impl_->carLamps,impl_->bodyPoses[car],impl_->physics->brake_factor(car),impl_->physics->brake_now(car),&impl_->carBodyOccluder});
-    glows.add(batch,rect,impl_->raceCamera.view(),impl_->raceCamera.eye(),impl_->raceCamera.fovy(),cars,
+    glows.add(batch,rect,impl_->raceCamera.view(),impl_->raceCamera.eye(),impl_->raceCamera.frustum(rect.w/rect.h),cars,
         [&](const render::Vec3& a,const render::Vec3& b){
             if (impl_->model->segment_blocked(a,b)) return true;
             for (unsigned car=0;car<impl_->physics->car_count();++car) {

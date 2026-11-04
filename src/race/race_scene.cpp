@@ -104,7 +104,8 @@ CourseScene::CourseScene(render::GpuContext& ctx, ByteSpan data, const std::stri
         for (const scene::Primitive& p : m.primitives) stats_.triangles += p.index_count / 3;
     stats_.meshes = scenery.meshes.size();
     stats_.textures = scenery.textures.size();
-    scenery_ = std::make_unique<render::GpuModel>(ctx, scenery);
+    // (The course models keep their geometry: GT3 clips at the guard band, DrawItem::guard_band.)
+    scenery_ = std::make_unique<render::GpuModel>(ctx, scenery, true);
     cluts_.add(scenery_.get(), std::move(scenery_cluts));
     set_moving(scenery_moving_, ctx, scenery_.get(), std::move(scenery_nodes));
     {
@@ -135,7 +136,7 @@ CourseScene::CourseScene(render::GpuContext& ctx, ByteSpan data, const std::stri
     if (!line.meshes.empty()) {
         for (scene::Mesh& m : line.meshes)
             for (scene::Primitive& p : m.primitives) p.flags |= scene::kAlphaBlend;
-        line_ = std::make_unique<render::GpuModel>(ctx, line);
+        line_ = std::make_unique<render::GpuModel>(ctx, line, true);
     }
 
     course::CourseModelOptions bo;
@@ -145,7 +146,7 @@ CourseScene::CourseScene(render::GpuContext& ctx, ByteSpan data, const std::stri
     occluder_.add(backdrop);
     if (!backdrop.meshes.empty()) {
         log_bounds("backdrop", backdrop);
-        backdrop_ = std::make_unique<render::GpuModel>(ctx, backdrop);
+        backdrop_ = std::make_unique<render::GpuModel>(ctx, backdrop, true);
         cluts_.add(backdrop_.get(), std::move(backdrop_cluts));
         set_moving(backdrop_moving_, ctx, backdrop_.get(), std::move(backdrop_nodes));
     }
@@ -201,6 +202,7 @@ void CourseScene::set_moving(Moving& m, render::GpuContext& ctx, const render::G
     if (!textures || nodes.empty()) return;
     m.nodes = std::move(nodes);
     m.gpu = std::make_unique<render::GpuModel>(ctx, *textures);
+    m.gpu->keep_geometry();
     size_t n = 0, parts = 0;
     for (const gtm1::AnimatedNodes& a : m.nodes) n += a.nodes().size(), parts += a.part_count();
     LOG_INFO("Course: %zu moving nodes, %zu parts", n, parts);
@@ -275,7 +277,13 @@ void CourseScene::add_items(std::vector<render::DrawItem>& items, const render::
         it.draw_distance = 0; // distant scenery: never distance-culled
         it.lights = lights;
         it.sphere_map = true; // chunk kind 2: the packet's own texture as a sphere map
-        it.modelview_scale = 0.01f; // GT3 draws slot 22 with Scale(0.01) x view (the sheen's viewer)
+        it.modelview_scale = kBackdropScale; // (the sheen's viewer, the guard band's planes)
+        it.guard_band = true;
+        // Drawn whole before the course, then GT3 resets the depth: the scenery always covers
+        // it, even where the ground lies below its sea (Tahiti Maze's lagoon shores).
+        it.in_order = true;
+        it.in_order_join = m == backdrop_moving_.gpu.get();
+        it.depth_reset = true;
         items.push_back(it);
     }
     for (const render::GpuModel* m : {scenery_.get(), scenery_moving_.gpu.get()}) {
@@ -287,6 +295,7 @@ void CourseScene::add_items(std::vector<render::DrawItem>& items, const render::
         it.frame_alpha = frame_alpha_;
         it.lights = lights;
         it.sphere_map = true; // chunk kind 2: the packet's own texture as a sphere map
+        it.guard_band = true;
         items.push_back(it);
     }
     if (line_) {
@@ -294,6 +303,7 @@ void CourseScene::add_items(std::vector<render::DrawItem>& items, const render::
         it.in_order = true;           // after the scenery's in-order blended passes
         it.frame_alpha = frame_alpha_; // colour only: the frame alpha stays (kKeepAlpha)
         it.draw_distance = 0;          // one mesh along the whole section: never distance-culled
+        it.guard_band = true;
         items.push_back(it);
     }
 }
@@ -308,6 +318,7 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
     opt.wheel_override = wheel_file;
     opt.showroom_car = showroom_car;
     opt.showroom_wheel = showroom_wheel;
+    showroom_rims_ = CarFile::is_car(showroom_car); // (load_car_model's test for LOD 0's menu wheels)
     opt.lod = -1;
     opt.wheels = true;
     opt.effects = true; // shadow nodes
@@ -424,19 +435,11 @@ CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::stri
             }
             rims_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, rim);
         }
-        scene::Model race_rim = hub_model(n + "_race");
-        if (!race_rim.meshes.empty()) {
-            if (rim_spin) {
-                race_rim_spin_texture_ = int(race_rim.textures.size());
-                race_rim.textures.push_back(*rim_spin);
-            }
-            race_rims_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, race_rim);
-        }
         scene::Model tyre = hub_model(n + "_tyre");
         if (!tyre.meshes.empty()) tyres_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, tyre);
         scene::Model band = hub_model(n + "_band");
         if (!band.meshes.empty()) bands_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, band);
-        wheel_radius_[size_t(i)] = std::max({render::model_origin_radius(rim), render::model_origin_radius(race_rim),
+        wheel_radius_[size_t(i)] = std::max({render::model_origin_radius(rim),
                                             render::model_origin_radius(tyre), render::model_origin_radius(band)});
     }
 }
@@ -551,6 +554,7 @@ void CarVisual::add_items(std::vector<render::DrawItem>& items, const sim::Vehic
                 render::DrawItem it{m, t, lod};
                 it.alpha = alpha;
                 it.in_order = true;
+                it.far_whole = true;
                 items.push_back(it);
             };
             for (int k = 0; shadow_[0] && k < look.lamp_shadows && k < 4; ++k)
@@ -638,10 +642,10 @@ CarVisual::WheelLook CarVisual::wheel_look(int i, const render::Mat4& at, const 
         out.tread = true;
         out.tread_shifts = tread_blur_shifts(turn, tyre_repeats_, right);
     }
+    if (detail < 3) out.turn = turn;
     if (outer && detail < 3) {
-        out.spinning = rim_spinning_image(turn);
         if (look.focus) out.rim = 1, out.rim_angles = rim_blur_angles(turn, right);
-        else if (rim_spin_texture_ >= 0 && out.spinning) out.rim = 2;
+        else if (rim_spin_texture_ >= 0 && rim_spinning_image(turn)) out.rim = 2;
     }
     return out;
 }
@@ -652,6 +656,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
     render::Mat4 world = pre * car_matrix(s);
     auto styled = [&](render::DrawItem it, bool body_surface = false) {
         it.car_surface = body_surface;
+        it.far_whole = true;
         for (int k = 0; k < 3; ++k) it.light_scale[k] = look.light_scale[k];
         it.reflection_scale = look.reflection;
         it.lamp = look.lamp;
@@ -716,14 +721,13 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
             it.no_fog = true;
             items.push_back(it);
         }
-        // Showroom wheels at LOD 0: the modelled rim, drawn sharp, until the wheel turns past the
-        // spinning image's 3 degrees a frame; then the race rim with GT3's blur or spinning image
-        // (both made for its flat image).
-        const bool modelled = lod == 0 && race_rims_[k];
-        const bool race_rim = modelled && wl.rim != 0 && wl.spinning;
-        const int rim_fx = modelled && !race_rim ? 0 : wl.rim;
-        if (const render::GpuModel* rim = race_rim ? race_rims_[k].get() : rims_[k].get()) {
+        // Showroom wheels at LOD 0: the modelled rim, blurred by copies of it turned back over the
+        // blur's turn (GT3's copies of a flat rim's image as geometry: DrawItem::spin_turn).
+        const bool modelled = lod == 0 && showroom_rims_;
+        if (const render::GpuModel* rim = rims_[k].get()) {
+            const int rim_fx = modelled ? 0 : wl.rim;
             render::DrawItem it = styled({rim, spun, lod});
+            if (modelled) it.spin_turn = wl.turn;
             if (rim_fx == 1) {
                 it.wheel_blur = 2;
                 it.wheel_blur_lod = rim_blur_lod(rim_width_);
@@ -732,7 +736,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
                 it.wheel_blur_alpha_ref = 0x20 / 128.0f;
                 it.wheel_steps = wl.rim_angles;
             } else if (rim_fx == 2) {
-                it.texture = rim->textures()[size_t(race_rim ? race_rim_spin_texture_ : rim_spin_texture_)].texture;
+                it.texture = rim->textures()[size_t(rim_spin_texture_)].texture;
             }
             items.push_back(it);
         }

@@ -180,6 +180,29 @@ TEST(race_camera_views) {
     CHECK(g.mode() == CameraMode::Bumper);
 }
 
+// Look back (issue 170) turns every player view round: the car faces -z, so the view looks
+// along +z while held; the chase views move ahead of the car, looking back past it.
+TEST(race_camera_look_back) {
+    sim::VehicleSetup setup;
+    sim::VehicleState s;
+    auto look = [&](CameraRig& c) {
+        c.update(s, setup, PadState{}, 1.0 / 60.0);
+        const render::Mat4& v = c.view();
+        return render::Vec3{-v.at(2, 0), -v.at(2, 1), -v.at(2, 2)};
+    };
+    for (CameraMode m : {CameraMode::Bumper, CameraMode::Chase, CameraMode::ChaseFar, CameraMode::Roof}) {
+        CameraRig c;
+        c.set_shake(false);
+        c.set_mode(m);
+        CHECK(look(c).z < -0.9f);
+        c.set_look_back(true);
+        CHECK(look(c).z > 0.9f);
+        if (m == CameraMode::Chase || m == CameraMode::ChaseFar) CHECK(c.eye().z < -3.0f);
+        c.set_look_back(false);
+        CHECK(look(c).z < -0.9f);
+    }
+}
+
 // GT3's in-car vibration: none without tyre slip; with slip the in-car view shakes (a few
 // degrees at most), the chase view never does, and the switch turns it off.
 TEST(race_camera_shake) {
@@ -210,6 +233,90 @@ TEST(race_camera_shake) {
     chase_off.set_mode(CameraMode::Chase);
     chase_off.set_shake(false);
     CHECK(diff(run(chase, 60), run(chase_off, 60)) < 1e-5f);
+}
+
+// Ours: the look around (the right stick): the stick's direction is where the view
+// turns, eased there and back ahead when let go. In-car the eye stays where it is; the chase views
+// go round the car; look back takes over while held; no mirror while turned to the side.
+TEST(race_camera_look) {
+    constexpr float kPi = 3.14159265f;
+    sim::VehicleSetup setup;
+    sim::VehicleState s; // at the origin, its nose along -z (x is its right)
+    auto run = [&](CameraRig& c, float x, float y, int frames) {
+        c.set_look(x, y);
+        for (int i = 0; i < frames; ++i) c.update(s, setup, PadState{}, 1.0 / 60.0);
+    };
+    auto forward = [](const CameraRig& c) {
+        const render::Mat4 v = c.view();
+        return render::Vec3{-v.at(2, 0), -v.at(2, 1), -v.at(2, 2)};
+    };
+    auto diff = [](const render::Mat4& x, const render::Mat4& y) {
+        float d = 0;
+        for (int i = 0; i < 16; ++i) d = std::max(d, std::fabs(x.m[i] - y.m[i]));
+        return d;
+    };
+    CameraRig plain, in_car;
+    run(plain, 0, 0, 150);
+    // Right: 90 degrees right, eased (not there in one frame), the eye in place, no mirror.
+    run(in_car, 1, 0, 1);
+    CHECK(in_car.look_yaw() > 0 && in_car.look_yaw() < 0.5f);
+    run(in_car, 1, 0, 59);
+    CHECK(near(in_car.look_yaw(), kPi / 2, 0.01f) && forward(in_car).x > 0.99f);
+    CHECK(render::length(in_car.eye() - plain.eye()) < 1e-4f);
+    CHECK(plain.shows_mirror() && !in_car.shows_mirror());
+    // Let go: back ahead, the view exactly as without.
+    run(in_car, 0, 0, 90);
+    CHECK(in_car.look_yaw() == 0 && diff(in_car.view(), plain.view()) < 1e-6f && in_car.shows_mirror());
+    // Pulled back: behind; pushed up: ahead; up and right: 45 degrees; a nudge inside kLookStart: nothing.
+    CameraRig back, up, diagonal, nudge;
+    run(back, 0.01f, 1, 60);
+    run(up, 0, -1, 60);
+    run(diagonal, 0.7071f, -0.7071f, 60);
+    run(nudge, CameraRig::kLookStart * 0.9f, 0, 60);
+    CHECK(near(std::fabs(back.look_yaw()), kPi, 0.02f) && forward(back).z > 0.99f);
+    CHECK(up.look_yaw() == 0 && nudge.look_yaw() == 0);
+    CHECK(near(diagonal.look_yaw(), kPi / 4, 0.01f));
+    // Straight back with the stick wobbling either side: the view keeps to one side (never swings
+    // round through ahead).
+    CameraRig wobble;
+    float last = 0;
+    int flips = 0;
+    for (int i = 0; i < 120; ++i) {
+        run(wobble, i % 2 ? 0.02f : -0.02f, 1, 1);
+        if (wobble.look_yaw() * last < 0) ++flips;
+        last = wobble.look_yaw();
+    }
+    CHECK(flips == 0 && near(std::fabs(last), kPi, 0.05f));
+    // The chase views go round the car: looking right, the eye is on its left.
+    CameraRig chase, far;
+    chase.set_mode(CameraMode::Chase);
+    far.set_mode(CameraMode::ChaseFar);
+    run(chase, 1, 0, 60);
+    run(far, 1, 0, 60);
+    CHECK(chase.eye().x < -3 && forward(chase).x > 0.9f);
+    CHECK(far.eye().x < -3 && forward(far).x > 0.8f);
+    // Look back takes over (exactly its view), in the far chase too (from in front of the car).
+    CameraRig held, back_only, far_back;
+    held.set_look_back(true);
+    back_only.set_look_back(true);
+    run(held, 1, 0, 60);
+    run(back_only, 0, 0, 60);
+    CHECK(diff(held.view(), back_only.view()) < 1e-6f);
+    far_back.set_mode(CameraMode::ChaseFar);
+    far_back.set_look_back(true);
+    run(far_back, 0, 0, 5);
+    CHECK(far_back.eye().z < -3 && forward(far_back).z > 0.8f);
+    // The pre-race shot ignores it.
+    CameraRig intro;
+    intro.set_intro(true, 0.5f);
+    run(intro, 1, 0, 60);
+    CHECK(intro.look_yaw() == 0);
+    // Look back held: L1, and R3 (the right stick's click) where the race reads the menu pad (GT3 original).
+    PadState l1, r3;
+    l1.buttons = u16(1u << unsigned(PadButton::L1));
+    r3.buttons = u16(1u << unsigned(PadButton::R3));
+    CHECK(look_back_held(l1, false) && look_back_held(l1, true));
+    CHECK(look_back_held(r3, true) && !look_back_held(r3, false) && !look_back_held(PadState{}, true));
 }
 
 // The car LOD by camera distance (< 30 m, < 80 m, beyond; at most the model's levels), and
@@ -484,24 +591,20 @@ TEST(race_rumble) {
     CHECK(rm.rumble(true, false).large == 0 && rm.rumble(false, false).large == 0);
     rm.reset();
     ev = {};
-    // Wheelspin under throttle drives the right trigger, the DualSense's throttle trigger (wheelspin) and Modern's
-    // motors.
+    // Wheelspin under throttle drives the throttle triggers (wheelspin) and Modern's motors.
     in.throttle = 1;
     for (sim::WheelState& w : s.wheels) w.slip_ratio = -0.6f; // wheelspin
     rm.update(s, &t, ev, in, dt);
-    CHECK(rm.trigger_right() > 0.3f);
-    CHECK(rm.trigger_left() == 0);
     CHECK(rm.wheelspin() > 0.8f);
     CHECK(rm.rumble(false, false).small > 80 && leans_small());
-    // Locked wheels under braking (positive slip) chatter on the left trigger and hold Modern's motors.
+    // Locked wheels under braking (positive slip) hold Modern's motors.
     in.throttle = 0, in.brake = 1;
     for (sim::WheelState& w : s.wheels) w.slip_ratio = 0.7f;
-    float peak = 0;
-    for (int i = 0; i < 8; ++i) rm.update(s, &t, ev, in, dt), peak = std::max(peak, rm.trigger_left());
-    CHECK(peak > 0.4f && rm.trigger_right() == 0 && rm.wheelspin() == 0);
+    rm.update(s, &t, ev, in, dt);
+    CHECK(rm.wheelspin() == 0);
     CHECK(rm.rumble(false, false).small > 80 && leans_small());
     rm.reset();
-    CHECK(rm.trigger_right() == 0 && rm.wheelspin() == 0);
+    CHECK(rm.wheelspin() == 0);
     CHECK(rm.rumble(true, false).large == 0 && rm.rumble(false, false).large == 0);
 }
 
@@ -1310,6 +1413,16 @@ TEST(race_demo_replay_decode) {
     int throttled = 0;
     for (size_t i = 240; i < 2096; ++i) throttled += d->frames[i].throttle > 0;
     CHECK(throttled > 1000);
+}
+
+// A demonstration played as a replay ends on the step that gets its first empty frame (presentation §A8c): a save of
+// T frames hands over T - 1, so the step after them; the licence box restarts it there, a menu's play mode 2 plays on.
+TEST(race_demo_replay_run_out) {
+    DemoReplay d;
+    d.frames.resize(3);
+    CHECK(!d.run_out(0) && !d.run_out(3));
+    CHECK(d.run_out(4) && d.run_out(5));
+    CHECK(DemoReplay{}.run_out(1) && !DemoReplay{}.run_out(0));
 }
 
 // The demo runs' car records (CarSaveEquipments): the car the run was recorded with. The arcade
@@ -2148,6 +2261,62 @@ TEST(race_sun_disc_disc) {
     race::SunParams se = params("seattle"), ro = params("rome");
     CHECK((se.view_flags[0] & 1) && !(se.view_flags[1] & 1) && !(se.view_flags[2] & 1));
     CHECK((ro.view_flags[0] & 1) && (ro.view_flags[1] & 1) && !(ro.view_flags[2] & 1));
+}
+
+// GT3's far plane (Env0 +0x20, presentation §G) on every US course, and the backdrop GT3 draws
+// at a hundredth of its depth: it lies inside 100 x that plane from anywhere near the road, so
+// neither GT3's plane nor our projection's (CameraRig::set_gt3_far) cuts it.
+TEST(race_far_plane_disc) {
+    Disc* disc = test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    std::map<std::string, float> fars;
+    size_t files = 0, backdrops = 0;
+    for (const auto& e : disc->volume().entries()) {
+        if (e.path.rfind("courses/US/", 0) != 0) continue;
+        ++files;
+        const std::string name = e.path.substr(11);
+        Bytes data = disc->volume().read(e);
+        course::CourseFile f = course::CourseFile::parse(data);
+        const race::SunParams env = race::SunParams::from_env0(f.section(data, course::kSlotEnv));
+        CHECK(env.has_env);
+        fars[name] = env.far_clip;
+        CHECK(env.far_clip >= 610 && env.far_clip <= 3010);
+        // The road's box, 200 m wider every way (the replay cameras stand beside it).
+        course::Road road = course::Road::parse(f.section(data, course::kSlotRoad));
+        render::Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+        for (const course::RoadSegment& seg : road.segments)
+            for (const course::Vec3& v : seg.vertices)
+                lo = {std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)},
+                hi = {std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+        course::CourseModelOptions opt;
+        opt.textures = opt.scenery = opt.course_line = opt.sky = false;
+        opt.backdrop = true;
+        float reach = 0;
+        for (const scene::Mesh& m : course::build_course_model(data, opt, name).meshes)
+            for (const scene::Vertex& v : m.vertices) {
+                const float* t = m.transform.data();
+                const float p[3] = {t[0] * v.pos[0] + t[4] * v.pos[1] + t[8] * v.pos[2] + t[12],
+                                    t[1] * v.pos[0] + t[5] * v.pos[1] + t[9] * v.pos[2] + t[13],
+                                    t[2] * v.pos[0] + t[6] * v.pos[1] + t[10] * v.pos[2] + t[14]};
+                const float dx = std::max(std::fabs(p[0] - lo.x), std::fabs(p[0] - hi.x)) + 200;
+                const float dy = std::max(std::fabs(p[1] - lo.y), std::fabs(p[1] - hi.y)) + 200;
+                const float dz = std::max(std::fabs(p[2] - lo.z), std::fabs(p[2] - hi.z)) + 200;
+                reach = std::max(reach, std::sqrt(dx * dx + dy * dy + dz * dz));
+            }
+        backdrops += reach > 0;
+        CHECK(reach < env.far_clip / race::CourseScene::kBackdropScale);
+    }
+    CHECK(files == 80 && backdrops >= 70);
+    CHECK(fars["super"] == 1000 && fars["montecarlo"] == 610 && fars["laguna"] == 690);
+    CHECK(fars["testcourse"] == 3000 && fars["L_testcourse3"] == 3010 && fars["grandvalley"] == 2000);
+    CHECK(fars["akasaka"] == 1200 && fars["rome"] == 1460 && fars["r_rome"] == 1500);
+    // The camera's far planes: GT3's, and the projection's out to the backdrop's.
+    race::CameraRig cam;
+    CHECK(cam.gt3_far == 0 && cam.far_plane == race::CameraRig::kFarPlane);
+    cam.set_gt3_far(fars["montecarlo"], race::CourseScene::kBackdropScale);
+    CHECK(cam.gt3_far == 610 && near(cam.far_plane, 61000, 0.5f));
+    cam.set_gt3_far(0, race::CourseScene::kBackdropScale);
+    CHECK(cam.far_plane == race::CameraRig::kFarPlane);
 }
 
 TEST(race_course_scene_lights) {

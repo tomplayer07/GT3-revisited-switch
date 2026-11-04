@@ -108,7 +108,7 @@ void assemble(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool
         constexpr u32 kNonOpaqueMask = scene::kAlphaBlend | scene::kAdditive | 
                                       scene::kMultiplyDest | scene::kAlphaOnly | 
                                       scene::kDestAlphaAdd | scene::kAlphaFailBlend | 
-                                      scene::kNoDepthWrite;
+                                      scene::kNoDepthWrite | scene::kDepthOnly | scene::kDestAlphaTest;
 
         std::vector<ExtractedPrim> merged;
         merged.reserve(extracted.size());
@@ -143,6 +143,21 @@ void assemble(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool
             mp.prim.first_index = u32(indices.size()) - info.index_offset;
             indices.insert(indices.end(), mp.indices.begin(), mp.indices.end());
             info.primitives.push_back(mp.prim);
+            const auto& q=mp.prim;
+            const u32* idx=indices.data()+info.index_offset+q.first_index;
+            float lo[3],hi[3];
+            for (int k=0;k<3;++k) lo[k]=hi[k]=m.vertices[idx[0]].pos[k];
+            for (u32 i=0;i<q.index_count;++i) for (int k=0;k<3;++k) {
+                lo[k]=std::min(lo[k],m.vertices[idx[i]].pos[k]); hi[k]=std::max(hi[k],m.vertices[idx[i]].pos[k]);
+            }
+            GpuModel::MeshInfo::Sphere sphere;
+            sphere.center={(lo[0]+hi[0])*0.5f,(lo[1]+hi[1])*0.5f,(lo[2]+hi[2])*0.5f};
+            float r2=0;
+            for (u32 i=0;i<q.index_count;++i) {
+                const auto* v=m.vertices[idx[i]].pos; const Vec3 d=Vec3{v[0],v[1],v[2]}-sphere.center;
+                r2=std::max(r2,dot(d,d));
+            }
+            sphere.radius=std::sqrt(r2); info.primitive_spheres.push_back(sphere);
         }
         // Unique edges for the wireframe view.
         info.line_first = u32(indices.size()) - info.index_offset;
@@ -192,7 +207,8 @@ bool ensure_buffer(SDL_GPUDevice* device, SDL_GPUBufferUsageFlags usage, SDL_GPU
 
 } // namespace
 
-GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model) : ctx_(&ctx), device_(ctx.device()) {
+GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model, bool keep_geometry)
+    : ctx_(&ctx), device_(ctx.device()), keep_(keep_geometry) {
     std::vector<scene::Vertex> vertices;
     std::vector<u32> indices;
     assemble(model.meshes, model.textures.size(), true, vertices, indices, meshes_);
@@ -202,6 +218,7 @@ GpuModel::GpuModel(GpuContext& ctx, const scene::Model& model) : ctx_(&ctx), dev
         vertices_ = up.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(), u32(vertices.size() * sizeof(scene::Vertex)));
         indices_ = up.buffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(), u32(indices.size() * sizeof(u32)));
     }
+    if (keep_) geometry_ = {std::move(vertices), std::move(indices)};
     for (const scene::Texture& t : model.textures) {
         TextureInfo ti;
         ti.clamp_u = t.clamp_u;
@@ -278,6 +295,7 @@ bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
     }
 #endif
     const Upload u{vertices_, all.data(), u32(all.size() * sizeof(scene::Vertex))};
+    if (keep_) geometry_.vertices = all;
     const bool ok = stage(&u, 1);
 #if defined(__SWITCH__)
     if (ok) uploaded_vertices_.remember(all);
@@ -386,12 +404,13 @@ bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
     if (!same_indices) uploads[count++] = {indices_, indices.data(), isize};
     if (render_profile::enabled && same_vertices) ++render_profile::frame.geometry_skipped;
     bool ok = vok && iok && (!count || stage(uploads, count));
+    if (ok && keep_) geometry_ = {vertices, indices};
     if (ok && !same_indices) uploaded_indices_ = std::move(indices);
 #if defined(__SWITCH__)
     if (ok && !same_vertices) uploaded_vertices_.remember(vertices);
     if (!ok) uploaded_vertices_.invalidate();
 #endif
-    if (!ok) meshes_.clear(), uploaded_indices_.clear();
+    if (!ok) meshes_.clear(), uploaded_indices_.clear(), geometry_ = {};
     return ok;
 }
 

@@ -574,12 +574,13 @@ void Hud::draw_meters(SDL_Renderer* r, const HudData& d) {
         std::string odo = buf;
         std::snprintf(buf, sizeof(buf), "%04d", int(std::fmod(std::max(0.0, d.trip_m / unit_m * 10.0), 1e4)));
         std::string trip = buf;
+        // In-car rows centred, the outside view's right-aligned (pushed) at their x.
         if (d.onboard) {
             text(r, ux(205), uy(428), odo, "odo#1", 1, cyan, text::HAlign::Center, true);
             text(r, ux(205), uy(370), trip, "odo#1", 1, cyan, text::HAlign::Center, true);
         } else {
-            text(r, ux(anchor(605, 0, 5)), uy(424), odo, "odo#1", 1, cyan, text::HAlign::Center, true);
-            text(r, ux(anchor(525, 0, 5)), uy(424), trip, "odo#1", 1, cyan, text::HAlign::Center, true);
+            text(r, ux(anchor(605, 0, 5)), uy(424), odo, "odo#1", 1, cyan, text::HAlign::Right, true);
+            text(r, ux(anchor(525, 0, 5)), uy(424), trip, "odo#1", 1, cyan, text::HAlign::Right, true);
         }
     }
     // Gear with the unlit "8" behind it, and the shift light.
@@ -668,15 +669,17 @@ void Hud::draw_times(SDL_Renderer* r, const HudData& d, int view) {
         if (row.view != kAnyView && row.view != view) continue;
         const float R = anchor(row.x, 0, row.align), y = row.y;
         if (row.part == HudPart::Target) {
-            // Licence targets: gold / silver / bronze with their marks at 75 % left of the time.
+            // Licence targets: gold / silver / bronze, time lines with no label; the mark at its own size in the label's
+            // place, right-aligned at the label's edge (truncated) + the row's w, centred on y + the row's h.
             static const char* const kMarks[] = {"mark_1st", "mark_2nd", "mark_3rd"};
             const size_t i = std::min<size_t>(row.sub, 2);
             std::string t = format_time(d.license_targets[i]);
-            text(r, ux(R), uy(y), t, "sw_16", 1, kAmber, text::HAlign::Right);
-            float tw = std::max(width(t, "sw_16", 90), 90.0f);
-            if (const Image* im = image(kMarks[i]))
-                blit(r, im->tex,
-                     {ux(R - tw - 8 - im->w * 0.75f), uy(y - 4), im->w * 0.75f * vsx(), im->h * 0.75f * vsy()});
+            text(r, ux(R), uy(y), t, "sw_16", 1, kAmber, text::HAlign::Right, true);
+            const float tw = std::max(width(t, "sw_16", 90), 90.0f);
+            if (const Image* im = image(kMarks[i])) {
+                const float right = R - std::trunc(tw + 10) + row.w, cy = y + row.h;
+                blit(r, im->tex, {ux(right - im->w), uy(cy - im->h / 2), im->w * vsx(), im->h * vsy()});
+            }
             continue;
         }
         if (row.part != HudPart::TimeLine) continue;
@@ -957,16 +960,17 @@ void Hud::draw(SDL_Renderer* r, const HudData& d, const SDL_FRect* viewport) {
             }
     }
     if (const HudRow* sw = row(HudPart::Steering); sw && (d.items & kItemSteering)) {
-        // A light grey tick from 24 to 43 units above the pivot, and the "steering" mark on that
-        // circle (radius 43), turned with the steering, up to 90 degrees either side.
+        // A light grey tick from 24 to 43 units above the pivot, and the "steering" wheel with its
+        // top edge at 43 above the pivot, centred across, turned about the pivot (the wheel's hub)
+        // with the steering, up to 90 degrees either side.
         const float px = anchor(sw->x, 0, sw->align), py = sw->y;
         polygon_strip(r, {{px - 0.5f, py - 43}, {px + 0.5f, py - 43}, {px - 0.5f, py - 24}, {px + 0.5f, py - 24}},
                       SDL_Color{208, 208, 208, 255});
         if (const Image* im = image("steering")) {
-            const float a = 90.0f * std::clamp(d.steer, -1.0f, 1.0f), rad = a * kPi / 180.0f;
-            const float cx = px + 43 * std::sin(rad), cy = py - 43 * std::cos(rad);
-            SDL_FRect rc{ux(cx - im->w / 2), uy(cy - im->h / 2), im->w * vsx(), im->h * vsy()};
-            SDL_RenderTextureRotated(r, im->tex, nullptr, &rc, a, nullptr, SDL_FLIP_NONE);
+            const float a = 90.0f * std::clamp(d.steer, -1.0f, 1.0f);
+            SDL_FRect rc{ux(px - im->w / 2), uy(py - 43), im->w * vsx(), im->h * vsy()};
+            const SDL_FPoint hub{im->w / 2 * vsx(), 43 * vsy()};
+            SDL_RenderTextureRotated(r, im->tex, nullptr, &rc, a, &hub, SDL_FLIP_NONE);
         }
     }
     if (const HudRow* ab = row(HudPart::AccelBrake); ab && (d.items & kItemAccelBrake)) {

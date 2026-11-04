@@ -12,7 +12,8 @@
 //   Triangle         reverse (pressure)
 //   left stick X     steering (D-pad Left/Right also steers, ramped)
 //   R2 / L2          shift up / down (edge-triggered, manual gearbox)
-//   (the race screen: R1 change view, L1 look back (held), Start pause)
+//   (the race screen: R1 change view, L1 look back (held), Start pause; ours: the right stick
+//   looks around, look_back_held below)
 //
 // Reverse (GT3's "back" action, a pressure input like the throttle): while its value is at
 // least the throttle's, the car requests reverse gear and the value drives it (the throttle in
@@ -34,6 +35,12 @@ struct ControlConfig {
     float digital_return_rate = 5.0f;// D-pad: return to centre per second when released
     bool automatic = true;
 };
+
+// Look back while held: L1. Under GT3 original, where the race reads the menu pad itself, also R3
+// (the right stick's click, Look back's in the Modern layout), which no race action uses there.
+inline bool look_back_held(const PadState& pad, bool menu_pad) {
+    return pad.down(PadButton::L1) || (menu_pad && pad.down(PadButton::R3));
+}
 
 // Stick axis byte (0..255, 128 = centre) -> -1..1 with deadzone and response curve.
 float stick_to_steer(u8 axis, const ControlConfig& cfg = {});
@@ -76,10 +83,9 @@ private:
 //   holds, leaning large; wheelspin, a slide (the tyre squeal's slip intensity, physics §8.3) and
 //   locked wheels hold, and curbs pulse at a rate that follows the speed, leaning small.
 // Either way a car the pad does not drive (VehicleTelemetry::pad_output: an AI run-up, after the
-// finish) sends nothing, so its motors stop. Ours too: the impulse triggers (lock-up chatter,
-// wheelspin buzz), which a DualShock 2 does not have, and the wheelspin for the DualSense's
-// throttle trigger (ForceFeedbackState::wheelspin). Feed it after every step; read
-// rumble()/triggers() and pass them to InputManager.
+// finish) sends nothing, so its motors stop. Ours too: the wheelspin for the throttle triggers
+// (ForceFeedbackState::wheelspin), which a DualShock 2 does not have. Feed it after every step;
+// pass rumble() to InputManager::set_rumble.
 class RumbleModel {
 public:
     // What the car met this step, for the Modern rumble.
@@ -96,14 +102,12 @@ public:
 
     // The motors: GT3 original's (`gt3`) or Modern's, mixed for a DualSense (`dualsense`) or another pad.
     PadRumble rumble(bool gt3, bool dualsense) const;
-    float trigger_left() const { return trig_l_; }  // brake trigger: ABS / lock-up
-    float trigger_right() const { return trig_r_; } // throttle trigger: wheelspin
-    float wheelspin() const { return spin_; }       // 0..1: the drive wheels spinning under throttle
+    float wheelspin() const { return spin_; } // 0..1: the drive wheels spinning under throttle
 
 private:
     PadRumble gt3_;
     float body_ = 0, tyres_ = 0; // Modern's levels, 0..1
-    float trig_l_ = 0, trig_r_ = 0, spin_ = 0;
+    float spin_ = 0;
     float impact_timer_ = 0, impact_level_ = 0;
     double clock_ = 0;
 };

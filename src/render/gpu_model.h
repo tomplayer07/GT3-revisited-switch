@@ -24,7 +24,9 @@ ModelStats model_stats(const scene::Model& model, int lod = -1);
 
 class GpuModel {
 public:
-    GpuModel(GpuContext& ctx, const scene::Model& model);
+    // `keep_geometry`: also keep the vertices and indices on the CPU (geometry()), for the
+    // triangles GT3 clips at the guard band (DrawItem::guard_band).
+    GpuModel(GpuContext& ctx, const scene::Model& model, bool keep_geometry = false);
     // A model whose geometry changes (update_geometry), drawn with `textures`' textures (shared:
     // that model must outlive this one; texture indices are its). Empty until the first update.
     GpuModel(GpuContext& ctx, const GpuModel& textures);
@@ -49,6 +51,14 @@ public:
     // no wireframe lines. E.g. the course's animated nodes, every frame.
     bool update_geometry(const std::vector<scene::Mesh>& meshes);
     size_t vertex_count() const { return vertex_count_; }
+    // The buffers' contents on the CPU (MeshInfo::vertex_offset / index_offset into them), when
+    // kept: the constructor's keep_geometry, or keep_geometry() before update_geometry.
+    struct Geometry {
+        std::vector<scene::Vertex> vertices;
+        std::vector<u32> indices;
+    };
+    const Geometry* geometry() const { return keep_ ? &geometry_ : nullptr; }
+    void keep_geometry() { keep_ = true; }
 
     struct MeshInfo {
         Mat4 transform;
@@ -61,6 +71,13 @@ public:
         // used for frustum culling, draw distance and transparency sorting.
         Vec3 center;
         float radius = 0;
+        // Each primitive's own sphere (the vertices of its triangles), in the same space: the
+        // guard band's clipping skips the primitives it cannot cut (View3D::upload_clipped).
+        struct Sphere {
+            Vec3 center;
+            float radius = 0;
+        };
+        std::vector<Sphere> primitive_spheres; // parallel to `primitives`
     };
     struct TextureInfo {
         SDL_GPUTexture* texture = nullptr;
@@ -106,6 +123,8 @@ private:
     VertexUploadCache uploaded_vertices_;
     TextureUploadBatch texture_batch_;
 #endif
+    bool keep_ = false;
+    Geometry geometry_;
 };
 
 } // namespace gt3r::render

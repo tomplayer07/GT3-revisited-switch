@@ -2,8 +2,10 @@
 
 #include "render/camera.h"
 #include "render/dynamic_scale.h"
+#include "render/gamma_pass.h"
 #include "render/gpu_context.h"
 #include "render/gpu_model.h"
+#include "render/guard_band.h"
 #include "render/math3d.h"
 #include "render/test_models.h"
 #include "render/view3d.h"
@@ -359,6 +361,34 @@ TEST(render_post_grade_formula) {
     CHECK(o[0] > 100 && o[0] < o[1] && o[1] < o[2]);
 }
 
+TEST(render_gs_pixel_truncates) {
+    auto px = [](float t, float c, u8 fog, float f) {
+        const float tt[3] = {t, t, t}, cc[3] = {c, c, c};
+        const u8 ff[3] = {fog, fog, fog};
+        return int(gs_pixel(tt, cc, ff, f)[0]);
+    };
+    // MODULATE: 0x80 keeps the texel, other colours truncate (101 x 0x40 >> 7 = 50.5 -> 50), as
+    // does the filtered texel (100.7 -> 100); colours past 0x80 clamp at 255.
+    CHECK(px(101, 128, 0, 256) == 101 && px(101, 128, 0, 0) == 0);
+    const float t3[3] = {101, 100.7f, 200}, c3[3] = {64, 128, 192};
+    const u8 none[3] = {0, 0, 0};
+    std::array<u8, 3> o = gs_pixel(t3, c3, none, 256);
+    CHECK(o[0] == 50 && o[1] == 100 && o[2] == 255);
+    // Fog (F C + (256 - F) FOGCOL) >> 8: F = 0 gives the fog colour; F = 255 (no fog) takes a
+    // colour past the fog colour down a level and keeps one below it.
+    CHECK(px(100, 128, 155, 0) == 155);
+    CHECK(px(50, 128, 0, 255) == 49 && px(200, 128, 91, 255) == 199 && px(60, 128, 155, 255) == 60);
+    // Super Speedway's road just ahead (a PCSX2 GS dump of the grid, in-car view): the base pass
+    // (colour (57, 56, 56), fogged at F = 255 to 0x9B5B5B), then the sheen (colour ~(32.75, 29.91,
+    // 26.19) there, fogged to black) added at a frame alpha of 0x80, over a texel (104, 105, 106):
+    // 71, 68, 66, where float maths and rounded writes give 73, 71, 68.
+    const float tex[3] = {104, 105, 106}, base[3] = {57, 56, 56}, sheen[3] = {32.75f, 29.91f, 26.19f};
+    const u8 fog[3] = {0x9B, 0x5B, 0x5B};
+    std::array<u8, 3> b = gs_pixel(tex, base, fog, 255), s = gs_pixel(tex, sheen, none, 255);
+    CHECK(b[0] == 46 && b[1] == 45 && b[2] == 46 && s[0] == 25 && s[1] == 23 && s[2] == 20);
+    CHECK(b[0] + s[0] == 71 && b[1] + s[1] == 68 && b[2] + s[2] == 66);
+}
+
 TEST(render_depth_of_field_layers) {
     // presentation §G17: the layers in drawing order, from the lens formula (in double here).
     DrawOptions::DepthOfField d;
@@ -435,6 +465,49 @@ TEST(render_depth_of_field_level_blur) {
         CHECK(dof_level_blur(k).sigma[1] > dof_level_blur(k - 1).sigma[1]);
 }
 
+// A modelled rim's turned copies share out the picture's samples (DrawItem::spin_turn): every
+// sample of a 4 x 4 pixel tile belongs to one copy, each copy to as many, and a pixel's copies are
+// evenly spaced over all of them, so it resolves to the mean of copies spread over the whole turn.
+// The filter after the scene weighs every cell alike when its taps cover the pattern's repeat.
+TEST(render_spin_copy_samples) {
+    for (int cells : {1, 2, 4, 8, 16})
+        for (int samples : {1, 2, 4, 8}) {
+            const int n = cells * samples;
+            std::vector<int> owned(size_t(n), 0);
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) {
+                    std::vector<int> held;
+                    for (int s = 0; s < samples; ++s) {
+                        const int c = spin_copy_at(x, y, s, cells);
+                        CHECK(c >= 0 && c < n);
+                        if (c < 0 || c >= n) return;
+                        ++owned[size_t(c)];
+                        held.push_back(c);
+                        CHECK(spin_copy_at(x + 4, y + 8, s, cells) == c); // the pattern repeats every 4 pixels
+                    }
+                    std::sort(held.begin(), held.end());
+                    for (size_t i = 1; i < held.size(); ++i) CHECK(held[i] - held[i - 1] == cells);
+                    // Within the period, the cells differ: the filter's taps take in each once.
+                    const int period = spin_copy_period(cells);
+                    if (period > 1) CHECK(spin_copy_at(x, y, 0, cells) != spin_copy_at(x + period / 2, y, 0, cells));
+                    for (int dy = 0; dy < 4; ++dy)
+                        for (int dx = 0; dx < 4; ++dx) // cells repeat on the period
+                            if (dx % period == 0 && dy % period == 0)
+                                CHECK(spin_copy_at(x + dx, y + dy, 0, cells) == spin_copy_at(x, y, 0, cells));
+                }
+            for (int k : owned) CHECK(k == 16 / cells); // the tile has 16 x samples samples for cells x samples copies
+        }
+    // Copies: from the samples up, doubling while more than 1.5 pixels apart, at most 16 cells and
+    // as many as fit 1.5 pixels apart over a radian of the rim's edge (64 from 96 pixels).
+    CHECK(spin_copy_count(0.0f, 200.0f, 4) == 4);
+    CHECK(spin_copy_count(6.0f, 200.0f, 4) == 4 && spin_copy_count(6.1f, 200.0f, 4) == 8);
+    CHECK(spin_copy_count(20.0f, 200.0f, 4) == 16 && spin_copy_count(1000.0f, 200.0f, 4) == 64);
+    CHECK(spin_copy_count(1000.0f, 96.0f, 4) == 64 && spin_copy_count(1000.0f, 95.0f, 4) == 32);
+    CHECK(spin_copy_count(1000.0f, 24.0f, 4) == 16 && spin_copy_count(1000.0f, 6.0f, 4) == 4);
+    CHECK(spin_copy_count(1000.0f, 200.0f, 1) == 16 && spin_copy_count(1000.0f, 200.0f, 8) == 64);
+    CHECK(spin_copy_period(1) == 1 && spin_copy_period(4) == 2 && spin_copy_period(16) == 4);
+}
+
 TEST(render_sheen_vertex_program) {
     // Super Speedway's sheen material and scene light 0's specular.
     scene::Material m;
@@ -471,4 +544,118 @@ TEST(render_sheen_vertex_program) {
     CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0);
     b = sheen_vertex_bytes(z, Vec3{-1, 1, 0}, bright, viewer, at, up);
     CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0);
+}
+
+TEST(render_guard_band_clip_matches_the_original) {
+    // Super Speedway's road under the in-car camera (a PCSX2 GS dump of the grid): two strips,
+    // (Y, X, A, B) and (A, E, Y, Y2). A, B, E, G 23 m ahead; X, Y, Y2 behind the eye (recovered
+    // from the clipped corners). GT3's near plane for zoom sqrt(3): 0.1 x 0.7002 x zoom.
+    const ClipPos A{-13.0384f, -2.4863f, 22.9095f}, B{-0.610632f, -2.48871f, 22.9885f};
+    const ClipPos E{-18.2423f, -2.47221f, 22.8833f}, G{-37.8906f, -2.44521f, 22.7273f};
+    const ClipPos X{-0.17547f, -2.48991f, -0.591788f}, Y{-12.6016f, -2.48993f, -0.64034f};
+    const ClipPos Y2{-17.7792f, -2.48799f, -0.708794f};
+    const float near_w = 0.1f * 0.7002f * std::sqrt(3.0f);
+    struct Case {
+        ClipPos v[3];
+        int n;
+        float screen[4][2]; // the corners as the GS received them (640 x 448, y down)
+    };
+    const Case cases[] = {
+        {{Y, X, A}, 4, {{16.5f, 671.94f}, {-320.0f, 671.94f}, {137.88f, 248.31f}, {-320.0f, 311.56f}}},
+        {{X, A, B}, 4, {{16.5f, 671.94f}, {266.19f, 671.94f}, {137.88f, 248.31f}, {311.5f, 248.25f}}},
+        {{A, E, Y}, 4, {{137.88f, 248.31f}, {-320.0f, 311.56f}, {64.9f, 248.2f}, {-320.0f, 300.8f}}},
+        {{E, Y, Y2}, 3, {{64.9f, 248.2f}, {-320.0f, 285.8f}, {-320.0f, 300.8f}}},
+        {{E, G, Y2}, 4, {{64.9f, 248.2f}, {-320.0f, 285.8f}, {-213.5f, 248.1f}, {-320.0f, 258.2f}}},
+    };
+    for (const Case& c : cases) {
+        ClipCorner out[kMaxClipCorners];
+        const int n = guard_clip(c.v, near_w, 0, out);
+        CHECK(n == c.n);
+        for (int i = 0; i < n && i < c.n; ++i) {
+            float x = 0, y = 0, w = 0;
+            for (int k = 0; k < 3; ++k)
+                x += out[i].b[k] * c.v[k].x, y += out[i].b[k] * c.v[k].y, w += out[i].b[k] * c.v[k].w;
+            CHECK(near(320.0f + 320.0f * x / w, c.screen[i][0], 0.1f));
+            CHECK(near(224.0f - 224.0f * y / w, c.screen[i][1], 0.1f));
+        }
+    }
+    // The sheen's colour at the corners: the vertices' bytes lerped, + 0.5, truncated (A 14,
+    // B 35, X 0 behind the eye): 1 and 3 on the bottom edge, as in the dump.
+    ClipCorner out[kMaxClipCorners];
+    const ClipPos tri[3] = {X, A, B};
+    CHECK(guard_clip(tri, near_w, 0, out) == 4);
+    const float bytes[3] = {0, 14, 35};
+    auto byte_at = [&](int i) {
+        float s = 0;
+        for (int k = 0; k < 3; ++k) s += out[i].b[k] * bytes[k];
+        return int(s + 0.5f);
+    };
+    CHECK(byte_at(0) == 1 && byte_at(1) == 3 && byte_at(2) == 14 && byte_at(3) == 35);
+    // Inside the guard band (on screen or beside it): nothing to clip; past one screen edge: culled.
+    CHECK(guard_flags(ClipPos{1.9f, -1.9f, 1.0f}, near_w, 0) == 0);
+    CHECK(guard_flags(ClipPos{2.1f, 0.0f, 1.0f}, near_w, 0) == 0x01);
+    CHECK(guard_flags(ClipPos{0.0f, 0.0f, 0.1f}, near_w, 0) == 0x20);
+    const ClipPos right[3] = {{1.5f, 0, 1}, {3.0f, 0.2f, 1}, {2.5f, -0.3f, 1}};
+    CHECK(guard_clip(right, near_w, 0, out) == 0);
+}
+
+TEST(render_guard_band_far_plane) {
+    // GT3's far plane (Env0 +0x20, e.g. Super Speedway's 1000 m): the VU's +z flag past it, and
+    // the plane cut after the near one, before the sides.
+    const float near_w = 0.1f, far_w = 1000.0f;
+    CHECK(guard_flags(ClipPos{0, 0, 1100}, near_w, far_w) == 0x10);
+    CHECK(screen_flags(ClipPos{0, 0, 1100}, near_w, far_w) == 0x10);
+    CHECK(guard_flags(ClipPos{0, 0, 1100}, near_w, 0) == 0); // no far plane
+    CHECK(guard_flags(ClipPos{0, 0, 1000}, near_w, far_w) == 0); // on the plane: inside
+    CHECK(guard_flags(ClipPos{2500, 0, 1100}, near_w, far_w) == (0x10 | 0x01));
+    // A triangle reaching past it: cut where the far edges cross w = 1000, halfway.
+    const ClipPos tri[3] = {{0, 0, 900}, {100, 0, 1100}, {-100, 0, 1100}};
+    ClipCorner out[kMaxClipCorners];
+    CHECK(guard_clip(tri, near_w, far_w, out) == 3);
+    const float want[3][3] = {{1, 0, 0}, {0.5f, 0, 0.5f}, {0.5f, 0.5f, 0}}; // p0, p(n-1), p1
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) CHECK(near(out[i].b[k], want[i][k], 1e-6f));
+    // Wholly beyond it: culled (its vertices share the flag).
+    const ClipPos beyond[3] = {{0, 0, 1001}, {100, 0, 1100}, {-100, 0, 1500}};
+    CHECK(guard_clip(beyond, near_w, far_w, out) == 0);
+    CHECK(guard_clip(beyond, near_w, 0, out) == 3);
+    // From behind the eye to past the far plane: both planes cut it, every corner between them.
+    const ClipPos l[3] = {{0, -1, -1}, {50, -1, 2000}, {-50, -1, 2000}};
+    const int n = guard_clip(l, near_w, far_w, out);
+    CHECK(n == 4);
+    for (int i = 0; i < n; ++i) {
+        float w = 0;
+        for (int k = 0; k < 3; ++k) w += out[i].b[k] * l[k].w;
+        CHECK(w > near_w - 1e-3f && w < far_w + 1e-2f);
+    }
+}
+
+TEST(render_gs_bilinear_matches_the_original) {
+    // Route 5's wet-road buffer in a PCSX2 GS dump of the grid (software renderer, the targets
+    // read back per draw). Blur copies: UV 0 / 1 at the pixel corners, so each pixel is the mean
+    // of four texels, ((a + b) >> 1 + (c + d) >> 1) >> 1, where a GPU rounds (17, 17, 12).
+    const u8 a[4] = {6, 1, 33, 26}, b[4] = {19, 26, 10, 12}, c[4] = {21, 16, 6, 5};
+    CHECK(gs_bilinear_texel(a, 2, 2, 1.0f, 1.0f) == 16);
+    CHECK(gs_bilinear_texel(b, 2, 2, 1.0f, 1.0f) == 16);
+    CHECK(gs_bilinear_texel(c, 2, 2, 1.0f, 1.0f) == 11);
+    // The composite: frame pixel (203, 270) samples texel (20.3, 77.29) of the 64 x 128 buffer
+    // with 4-bit weights (12, 12), 31 where the exact filter gives 31.6; times its frame alpha
+    // 51 it adds (31 x 51) >> 7 = 12, as the dump shows.
+    const u8 d[4] = {29, 32, 30, 32};
+    CHECK(gs_bilinear_texel(d, 2, 2, 20.3f - 19.0f, 77.2857f - 76.0f) == 31);
+    // On a texel centre: the texel; outside the image: the edge texel.
+    CHECK(gs_bilinear_texel(d, 2, 2, 0.5f, 1.5f) == 30);
+    CHECK(gs_bilinear_texel(d, 2, 2, -3.0f, -3.0f) == 29);
+}
+
+// [video] gamma: a number in range, anything else 1 (GT3's colours, no pass).
+TEST(render_gamma_setting) {
+    CHECK(parse_gamma("1.25") == 1.25f);
+    CHECK(parse_gamma("") == 1.0f);
+    CHECK(parse_gamma("bright") == 1.0f);
+    CHECK(parse_gamma("nan") == 1.0f);
+    CHECK(parse_gamma("0.1") == kGammaMin);
+    CHECK(parse_gamma("9") == kGammaMax);
+    CHECK(!gamma_changes(parse_gamma("1.00")));
+    CHECK(gamma_changes(1.05f) && gamma_changes(0.95f));
 }

@@ -98,9 +98,10 @@ wheels straight.
 ### §A3 License HUD
 
 The lap / time block shows "Best", the elapsed "Time" (y 112) and the three
-target times at y 140, 168 and 196, each with its `mark_1st` / `mark_2nd` /
-`mark_3rd` icon drawn at 75 % scale left of the time (`Hud::draw_times`; the
-license layout, §D4). There is no lap count, no position and no message display
+target times at y 140, 168 and 196, drawn as the other time lines with no
+label: each `mark_1st` / `mark_2nd` / `mark_3rd` icon at its own size in the
+label's place, its right edge 8 units right of the label's edge, centered 7
+units above the line's y (`Hud::draw_times`; the license layout, §D4). There is no lap count, no position and no message display
 (no WRONG WAY or AUTO DRIVE, §B4); the map sits at (16, 32).
 
 **Best** is the best judged time of the visit: every run that passes the test
@@ -190,9 +191,13 @@ after the event) fill the page.
 The license quick menu draws the live race scene into the preview box at
 (32, 58), 280 x 210 of the menu frame, and nothing behind the rest of the page
 (`render_drive`). Before any run, the box shows the disc's demonstration of the
-test (§G12), looping: it restarts 180 ticks after the demonstration's inputs run
-out. After a run it replays the run just driven, looping (`start_preview`); after
-a run left with the pause window's EXIT it shows the demonstration again (§A8).
+test (§G12), looping: it restarts on the step after the demonstration's last
+recorded frame, where its replay ends (`DemoReplay::run_out`, test
+`race_demo_replay_run_out`). After a run it replays the run just driven, looping
+(`start_preview`); after a run left with the pause window's EXIT, and after
+DEMONSTRATION, it shows the demonstration again (§A8). It is seen as the race
+behind the other quick menus is (§C5): from the driver's camera, with the start
+shot over a standing start's hold.
 The box is silent, like the race behind every quick menu: only the menu's music
 and sounds play. What the other quick menus draw behind them is in §C5.
 
@@ -293,8 +298,9 @@ start.
 Every live run with a standing-start hold (§B1) opens on the disc's starting
 shot (`cameras/start.cam`, a one-record camera script in the car's frame;
 `CameraRig::set_start_shot`): races, license tests from rest and machine tests.
-Replays, demonstrations, the attract demo and the menu backdrops do not play it
-(`RaceScreen::live_view`), and the 2P battle has no hold. With C = the frames
+Replays, demonstrations and the attract demo do not play it; the race behind a
+quick menu and the license preview box do, being seen from the driver's camera
+(`RaceScreen::live_camera`, §C5); the 2P battle has no hold. With C = the frames
 left to the signal (`RaceScreen::frames_to_signal`), the shot is shown while C is
 60 or more, so until one second before the signal, at
 
@@ -679,7 +685,7 @@ with it before the first run (`menu_before_run`):
   | start / try again | the run again |
   | free run | the course alone before a GT race; on a course whose pit stop line has no pit box it is refused with "Free run is not available on this course." (GT Mode's such courses are its dirt courses, where FREE RUN is already off) |
   | replay | the run's replay (as in §C4), then the §C1 transition back to the menu |
-  | demo | the disc's demonstration of the test (§G12), or without one the race's AI driving the car, from the TV cameras; REPLAY is disabled after it (below) |
+  | demo | the disc's demonstration of the test (§G12), or without one the race's AI driving the car, from the TV cameras, played once as a replay: its end or the replay pause's EXIT goes back to the menu through the §C1 transition, opened again with START focused (the license menu's box then shows the demonstration, §A7); REPLAY is disabled after it (below) |
   | save replay | write the run's replay file (a toast confirms) |
   | save ghost | write the replay of the visit's best run (a free run: the run of its best lap; §G11) |
   | load ghost | load a saved ghost at once (§G11) |
@@ -726,7 +732,8 @@ with it before the first run (`menu_before_run`):
 
 The result a run reports to the menus is taken when the live run ends
 (`RaceResultLatch`, `RaceScreen::latch_result`), before any replay. This holds
-for every run, as its replays and the menu's backdrop (§C5) re-run it (a license
+for every run, as its replays re-run it and the menu's backdrop (§C5) builds the
+race again (a license
 result still reports the visit's best run, §A5). A race replay re-runs the whole
 field, so the standings afterwards are the replay's, not the race's. A race's
 result menu therefore keeps the rows latched with it.
@@ -778,16 +785,18 @@ What a quick menu shows behind its layout depends on the mode
 | result menus: arcade race, 2P battle, GT race, championship | no race: the layout's own opaque checker background (the root page's `bg`) |
 | license test | the preview box (§A7) |
 
-- **The race.** The menu's race plays like a replay (play mode 2): records are
-  off, and the view mode and target are picked as for the attract demo, drawing
-  from the same generator and count (`pick_attract_view`, §G13). It is silent:
-  no car or course sound plays behind a quick menu (records off mutes them). A
-  single car replays its last run from the start, and the race never ends. Once
-  the recording runs out, the car gets a cleared input frame (no
-  steering, throttle or brake; its gearbox kept) and rolls on. Before any run
-  the recording is empty, so the car stands at its start with no input. A field
-  (the GT pre-race menus) stands on its grid, not simulated, under the TV
-  director's cameras.
+- **The race.** The menu's race runs in play mode 2 with records off. It is
+  silent: no car or course sound plays behind a quick menu (records off mutes
+  them). A single car (time trial, free run, machine test) is driven by the
+  race's AI from its start, with no recording, and the race never ends: the
+  computer laps the course for as long as the menu stays, the same before any
+  run, after a run and after DEMONSTRATION. No time, lap or record it drives
+  counts; the last run stays the one REPLAY, SAVE REPLAY and the ghost use. It
+  is seen from the driver's camera, the view the player last drove with (with
+  the start shot over a standing start's hold, §B3), not the TV cameras. A field
+  (the GT pre-race menus) is the race itself, every car driven by the AI: the
+  start shot over its countdown, then the race from the player's car, on lap
+  after lap past its last, with nothing it drives counted.
 - Choosing a root item other than the option, records and logger items stops it.
   Back from an item that keeps the menu (save, load ghost, a dialog), it starts
   again from the start.
@@ -1041,7 +1050,7 @@ REPLAY OPTIONS ITEM time (default off, §D9):
 | Message | Text | Font, color | Place | Timing |
 |---|---|---|---|---|
 | lap time | "m'ss.mmm" (§D10) | sw_20, green (73, 204, 43) | the anchor | queued |
-| split time | "T<n> m'ss.mmm", the time since the lap's start | sw_16, green | the anchor | queued |
+| split time | "T<n> m'ss.mmm", the time since the lap's start (license tests: the run's start) | sw_16, green | the anchor | queued |
 | gap | "+m'ss.mmm" behind, the font's dash glyph and the time ahead | sw_16, red (240, 0, 0) behind (gap ≥ 0), light blue (128, 128, 255) ahead | 25 below the anchor | at once |
 | laps down | "+N Laps" (`RACEDISPLAY_LapDiffInfo`) | sw_16, red | 25 below the anchor | at once |
 | pit-in | "<car> Pitting in..." (the name as on the results, §B6) | sw_16, green | the anchor | queued |
@@ -1085,7 +1094,11 @@ What each mode shows:
   player's own car; when faster there is none. A free run also shows its two
   notes after the start signal (§B2).
 - **License tests.** Split times only, numbered on through the laps; no lap
-  time.
+  time. A lap test's line crossings before its last lap are split times too,
+  the line counting as each lap's last timing point (`race::license_split_number`;
+  on a course with no split points, a 3-lap test shows "T1" and "T2" at the
+  line). Every license split time is the time since the run's start, not the
+  lap's (test `exact_game_licence_lap_splits`).
 - **Machine tests 0-400 m / 0-1000 m** (§B7; test `race_machine_test_popups`,
   `race::machine_test_message`). At the 400 m split point of the 0-1000 m test
   "T1 m'ss.mmm" with the time since GO, as a split time; at the goal the time to
@@ -1239,8 +1252,9 @@ of the 640 x 360 UI.
   side, the block instead goes into the area (moved in by the inset and down to
   the area's top). When the rank goes into the area, the map goes with it.
   On the driving layout at its normal size, on 16:9 and 20:9, no control is
-  in the top corners, so the blocks keep their places (test
-  `touch_control_bounds`).
+  in the top corners but reverse, which comes up under the lap list's last line
+  (on 20:9 in the side bar, past the game area), so the blocks keep their places
+  (test `touch_control_bounds`).
 
 ---
 
@@ -1502,7 +1516,7 @@ sequence's music: the start jingle over the hold, the race music from the signal
 - a theater replay returns to the theater;
 - otherwise the replay pause opens with "End of replay".
 
-**Saving.** Save replay writes `<user data>/replays/<course>_<car>_<stamp>.gt3replay`
+**Saving.** Save replay writes `<save folder>/replays/<course>_<car>_<stamp>.gt3replay`
 at once (a toast, no slot page). Two saves in the same second take the next free
 second's stamp. That folder is all the theater lists (§G9).
 
@@ -1624,8 +1638,8 @@ trigger bound to accelerate is still R2 in a replay.
   15 frames and held 15 frames. Up / Down re-arm the shot for the new car (§H8):
   a shot that has run out for it gives way to the record at the new car's D
   whatever its progress, else the camera turns on board; for 15 frames after the
-  change a cut may take a record at any progress. The attract demo in mode 0 (and the
-  menu backdrops) moves to the next car once 300 frames (5 s) have passed and
+  change a cut may take a record at any progress. The attract demo in mode 0 moves to
+  the next car once 300 frames (5 s) have passed and
   the current shot's gate is open (§H8: in mode 0, once the shot has run out
   and any 3 s hold is over), then counts the 300 frames again; its new shot is
   searched at once, the current record included (§H8). Each of these car
@@ -1843,8 +1857,9 @@ does for them:
   the replay pause; EXIT or the end of the replay returns to the theater.
 - **Demonstration** (mode `theater_demo`): the disc's demonstration of a license
   test or arcade time trial plays as its run (§G12), with TV cameras (the REPLAY
-  OPTIONS view mode, opening as any replay, §H8) and only the mark. It ends 180 ticks after its inputs run out, or by EXIT.
-- **Files.** The theater lists `<user data>/replays/*.gt3replay`, newest first,
+  OPTIONS view mode, opening as any replay, §H8) and only the mark. It ends on the step after its last recorded frame
+  (§G12), or by EXIT.
+- **Files.** The theater lists `<save folder>/replays/*.gt3replay`, newest first,
   with each file's header (`race::list_replay_entries`). The info panel shows
   Size ("123KB"), Date ("YYYY/MM/DD", the saved time or else the file name's
   stamp), Mode (`replay_kind_name`: Time Trial, Arcade, 2P Battle, GT Mode,
@@ -1998,8 +2013,13 @@ DEMONSTRATION has the race's AI drive the car instead.
 - **Run-up.** The flying run-up is driven by the race's AI, and the recorded
   frames are ignored until the line.
 - **Viewing.** Demonstrations are watched from the TV cameras in the REPLAY
-  OPTIONS view mode, and open as every replay does (§H8). Start, Cross or
-  Circle end a quick-menu demonstration.
+  OPTIONS view mode, and open as every replay does (§H8), with only the mark.
+- **The end.** A demonstration plays once, as a replay: only Start opens the
+  replay pause (CONTINUE, EXIT, REPLAY OPTIONS), and it ends on the step after
+  its last recorded frame (the first that hands the car an empty frame;
+  `DemoReplay::run_out`). The quick menu's then goes back to its menu through the
+  §C1 transition, opened again with START focused; the license menu's preview box
+  then loops the demonstration (§A7).
 
 ### §G13 The attract demo's view
 
@@ -2214,8 +2234,23 @@ the view does not judder.
 - **L1 held looks back.**
   - Chase: heading + π, pitch negated.
   - In-car: the forward axis reversed and the eye's z mirrored.
+  - Ours, far chase and roof (§H4): turned round the same way, the far chase's
+    eye ahead of the car looking back past it.
   - No mirror while looking back.
-- **Rear-view mirror** (in-car views, not in replays, not while looking back):
+  - Ours: the right stick's click looks back too, on the GT3 original controls
+    as in the modern ones.
+  - Test `race_camera_look_back`: every player view looks back while held.
+- **The right stick looks around** (ours).
+  - The stick's direction is where the view turns: right 90° right, pulled back
+    behind, pushed up ahead. The view eases there and back ahead when the stick
+    is let go.
+  - In-car the view turns about the car's up axis with the eye in place; the
+    chase views go round the car.
+  - Look back takes over while held. No mirror while the view is turned more
+    than 0.35 rad (20°) to the side.
+  - On phones a drag on the open screen, away from the controls, does the same.
+- **Rear-view mirror** (in-car views, not in replays, not while looking back or
+  turned to the side):
   - **Placement.** A 240 x 64 rectangle at (200, 20) of the frame (pushed by
     106.667 in 16:9) with a 1-unit black outline. On a 4:3 2P half it is
     240 x 55 at (200, 16) of the 640 x 224 half. Side-by-side 2P halves have
@@ -2454,7 +2489,12 @@ offsets in `docs/formats/course.md`), read by `race::SunParams::from_env0`.
   75 / 0.98; Laguna Seca b 1.00 (no fog). A course without Env0 gets a
   placeholder linear fog (350 .. 3000 m, at most 55 %, the sky's horizon color).
   `GT3R_NO_COURSE_FOG=1` forces the placeholder.
-- **Draw distance.** 2500 m.
+- **Draw distance.** The course's far plane (+0x20: 610 m at Monte Carlo, 690 m at Laguna Seca,
+  1000 m on most courses, 2000 m at Grand Valley, 3000 m at the Test Course), as eye depth:
+  scenery reaching past it is cut there, scenery wholly beyond is not drawn, and a car is not
+  drawn once any of it lies beyond. The sky and the distant backdrop are not cut (the backdrop is
+  drawn at a hundredth of its depth). A course without Env0 draws to 2500 m.
+  `GT3R_NO_FAR_PLANE=1` draws to 2500 m everywhere (for comparisons).
 - **Color grade** (flag 0x80): the levels black / white (+0x98C / +0x990),
   per channel the curve x^2 + 2 g x (1 - x) (+0x980 .. +0x988; g = 0.5 is no
   change), then the saturation (+0x994) around luma (0.30, 0.59, 0.11). It is a
@@ -2540,6 +2580,9 @@ car's heading; `CarShadowParams`):
 - **Lookup.** The map is read with a view-dependent lookup like the game's
   (`DrawOptions::env_gt3_lookup`), with a Fresnel-like weight 1 - 0.8 cos.
   `[video] car_reflections = off` uses a sky / ground color gradient instead.
+- **Decals.** Most decals are drawn before the reflection without writing depth,
+  so the body's reflection lies over them as over the paint around them; a
+  decal's background matches the finish it sits on.
 - **Lamp discs on point-light courses.** Of the same nine candidate lamps (§I3),
   the six strongest point lamps are drawn into the map as discs: a 10-wedge fan at
   the lamp's direction, radius = the record's disc size (+0x40) / distance,
@@ -2628,9 +2671,9 @@ k = 0, so no glare is drawn.
   spokes painted on and cut out, and simpler tyres; only the menus load the
   modelled rims and finer tyres (`menu/cars`, `menu/wheel`). Ours draws the
   menus' wheels at full detail with `[video] showroom_wheels = on` (the default
-  except on phones and tablets). Their modelled rims are drawn sharp until a
-  wheel turns more than 3 degrees a frame, where GT3 blurs a rim or shows its
-  spinning image; past that, ours draws the race rim with them, as GT3 does.
+  except on phones and tablets). Ours blurs their spinning modelled rims over
+  the same turn GT3 blurs its rims over, by copies of the rim itself, so the
+  blur grows smoothly from a standstill.
 - Ours: `DrawItem::in_order` draws an item whole at its place (its opaque
   meshes, then its blended ones in model order) before later items' opaque
   meshes: the course scenery, the wet-road frame passes and each car shadow.
@@ -2816,7 +2859,7 @@ or replaces the weakest (strength x weight). With a random k in 0 .. 7:
 - **Alpha and texture.** Alpha = min(1, 1.99 x strength x weight x opacity) x
   texel. The texture is the course's slot 26 (four 32 x 64 frames, frame k & 3).
 - **Cull.** A puff is drawn only while its center's view depth d is inside
-  (near, far) and it is under two screen widths across (P0 x size < 2 d, P0 = the
+  (near, far; far = the course's far plane, §I1) and it is under two screen widths across (P0 x size < 2 d, P0 = the
   projection's x scale). A camera inside or next to a puff does not see it (test
   `race_tyre_smoke_cull`).
 - **Ground split.** A puff up to 3 m that crosses the ground line (ground -
@@ -3005,7 +3048,8 @@ In races each wheel draws, besides its tire and rim:
 - **Spin blur** (the main view): the turn over most of the last frame, less for a wheel
   crossing the screen. The followed car's tire tread (on tires that ask for it) and rim
   are blurred over that turn; the other cars switch to their wheel's pre-blurred rim
-  image above 3° a frame.
+  image above 3° a frame. Ours with showroom wheels: every car's modelled rims are
+  blurred over that turn.
 - **Camber**: each wheel is drawn tilted by its camber from the suspension (a physics
   output); the arch shade turns with it, not with the steering.
 

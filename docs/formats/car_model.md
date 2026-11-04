@@ -110,10 +110,14 @@ probably the colour). The GTM1 holds only the **rim** at unit scale (lip
 radius ≈ 1.0, outer face at x = 0 pointing -X, barrel to x ≈ +0.17), i.e. a
 left-hand wheel. Wheels have 1 node with 4 LODs and 6 texture-LOD/variant
 tables (+0x34). Their textured packets use the runtime texture slot (`mat`
-texture field 0x1FF, set with op 0x29); the decoder uses the first texture of
-the current set (the rim image). GTTW +0x10 flags: bit 0 = texture set per
-axle, bit 1 = left/right variants, bit 2 = right wheel mirrored (asymmetric
-spokes), bit 3 = no variants (medium confidence).
+texture field 0x1FF, set with op 0x29), which holds the rim image: the first
+texture of entry 1 of the texture-LOD table (+0x34, below). The current set's
+first texture is not always that image: it differs on 53 of the 286 car files'
+wheels and 77 of the 464 wheel files (the Miata LS's is a dark copy under
+another palette, a flat disc), and on none of the 463 `menu/wheel` files.
+GTTW +0x10 flags: bit 0 = texture set per axle, bit 1 = left/right variants,
+bit 2 = right wheel mirrored (asymmetric spokes), bit 3 = no variants (medium
+confidence).
 
 ## GTM1 model
 
@@ -194,7 +198,7 @@ Render-state ops that matter for cars (each sets GS drawing state):
 |---|---|---|
 | 1A / 1B | TEST.ATE on / off | on for body passes, off for reflection passes |
 | 1C a, r | TEST.ATST = a, AREF = r | (6 GREATER, 0x20) by default; (6, 0) or (5 GEQUAL, 0) before some passes |
-| 1D / 1E | TEST.DATE on / off | on for reflection passes |
+| 1D / 1E | TEST.DATE on / off | on for reflection passes, which draw with DATM 0 (where the frame alpha < 0x80) |
 | 20 m, f | ALPHA = m (A\|B<<2\|C<<4\|D<<6), FIX = f | 0x44 = (Cs-Cd)·As+Cd for glass/decals, 0x58 = Cs·Ad+Cd for reflections and specular overlays |
 | 24 v | FRAME.FBMSK = v | 0xFF000000 = colour only (glass, decals keep the reflectivity alpha), 0xFFFFFFFF = depth only, 0 = all |
 | 17 / 18 | depth test on / off (17 only when depth testing is enabled globally) | |
@@ -214,7 +218,12 @@ tested GEQUAL, a second pass over the same vertices passes on equal depth. Decal
 are not such passes: they are their own geometry 1-8 mm above the body (ml0002's
 sidepod and engine cover decals), so they need the depth to resolve millimetres at
 the replay cameras' 100-150 m telephoto distances (docs/dev/RENDERING.md, coordinate
-conventions).
+conventions). Most decals are drawn with depth writes off (op 0x25) and colour only
+(FBMSK 0xFF000000), before the reflection passes: the body's depth and alpha stay
+under them, so the reflection over the body's vertices covers the decal as it covers
+the paint around it (682 draws on 265 of the 286 models in `cars/day/`). The glass,
+drawn the same way, leaves its depth: in its own draw (`ty2056`), or in a depth-only
+pass (FBMSK 0xFFFFFFFF) over its vertices after its reflection (`nm0006`).
 
 Programs leave ATE on with (GREATER, 0x20) and DATE off when they end (1581
 of 1607 car/wheel streams), so that is the entry state the decoder assumes.
@@ -245,7 +254,17 @@ are untextured with a per-vertex weight. Glass is a nearly uniform dark texture
 with GS alpha ≈ 0x73, drawn with normal blending and the alpha channel
 write-masked, so it is ~90 % dark plus the reflection on top. The glass's own
 texture is used as its reflectivity because the real Ad (whatever lies
-behind it) is unknown.
+behind it) is unknown, unless an alpha-only pass sets it.
+
+Alpha-only passes (FBMSK 0x00FFFFFF; 69 draws on 62 models in `cars/day/`) are
+drawn over the glass before its reflection: the frame alpha they write (texel ×
+vertex alpha) is the weight of the reflection passes after them over the same
+vertices (`ty2056`'s canopy: an untextured pass at 0x80, full reflectivity). The
+decoder takes them as the weight and draws nothing for them. Depth-only passes
+(FBMSK 0xFFFFFFFF with depth writes on; 101 draws on 73 models) write the depth of
+a part drawn without depth writes, after its reflection (`nm0006`'s windows);
+they are `scene::kDepthOnly` primitives, drawn in model order with the blended
+passes.
 
 Offsets in `06`/`07`/`08`/`09`/`0A` are relative to the address of the operand
 field that holds them. Ops 0x0C and 0x10 (matrices) appear in a few cars only
@@ -323,8 +342,22 @@ C1 0.8: weight 0.2 head-on, 1.0 at grazing angles; prize models use coloured
 rows, e.g. the gold cups C0 0.9, C1 (−0.5, −0.36, −0.26): a warm boost
 head-on), K = 1 − (a per-car value, meaning open). The result is an 8-bit GS
 colour (≤ 255, i.e. ≤ 255/128 of the texel after MODULATE). Blend ALPHA 0x58 (Cs·Ad + Cd) with the fog colour set to black; Ad is
-the frame alpha the body pass wrote (texel alpha × lit alpha). Later reflection
-chunks use the destination-alpha test so overlaps are not added twice.
+the frame alpha the body pass wrote (texel alpha × lit alpha). A reflection pass
+writes its own alpha too: the map is PSMCT16, cleared with alpha 0x80 and drawn
+with the alpha masked, so every texel reads TEXA TA1 = 0x80, and with vertex alpha
+0x80 the pass leaves Ad = 0x80 wherever it draws. Reflection chunks with the
+destination-alpha test (op 0x1D; drawn with DATM 0) draw only where Ad < 0x80:
+not over an earlier reflection, and not on texels at the full reflectivity 0x80
+(the body textures keep their reflective texels at 0x7F or below; some trim
+textures are 0x80 throughout). Checked in a GS dump of the GT-One race car
+(`ty2056`) at Super Speedway: DATE on, DATM 0 on its tested reflection draws, TEXA
+(TA0 0, TA1 0x80), vertex alpha 0x80 on every reflection draw. Tested passes carry
+most of the reflection: 126,513 of 175,610 reflection triangles on the 124 models
+of `cars/day/` with alpha-only or depth-only passes. The renderer
+discards a tested pass's fragments where the weight reaches 0x80
+(`scene::kDestAlphaTest`); of the earlier reflections, the decoder drops the
+triangles a tested pass repeats exactly (0.2 % of them) and does not model
+partial overlaps.
 
 Specular overlays: blended (PRIM.ABE) packets that are not reflection passes but
 are drawn with ALPHA 0x58 add the same way, Cs·Ad + Cd over the body pass below.
@@ -381,7 +414,9 @@ the u16 at Tex1 +0x10, 0 on disc), bits 19-22 CPSM (0 = CT32, 2 = CT16), bits
 23-31 the index of the texture record (0x28-byte records at Tex1 +0x18) that
 is patched. Entries do not have to follow texture order: 1,550 of 13,909
 variants (about 11 cars per time of day, e.g. `ho1086`) skip textures, and
-1,044 entries switch the CLUT between CT32 and CT16 (e.g. `ar0006`). Variant 0
+1,044 entries switch the CLUT between CT32 and CT16 (e.g. `ar0006`; the GS widens a CT16
+entry's 5-bit channels by a shift alone, low bits 0: 31 -> 248, as for every 16-bit texel and
+CLUT). Variant 0
 holds the TEX0 values. All CLUTs are already in the uploaded buffers, so
 painting is just choosing CBP/CPSM/CSA. V equals the car's colour
 count in `database/carcolor.db` (verified for 275 of 287 cars, all LOD sets). For example,
@@ -499,10 +534,9 @@ menus' tyre detail. Levels 1 and 2 keep the race's. Placement is the same for
 both, so the menus' wheel sits where the race's would
 (`CarModelOptions::showroom_car`, `showroom_wheel`). Across the 286 cars of
 NTSC-U 1.10 the menus' rims have a median of 1,413 triangles against 112 for
-race level 0: about 5,200 more triangles a car with four wheels. Level 0 also
-keeps the race rims, meshes `wheel_<x>_race`: the races draw them while a
-wheel spins fast enough for GT3's rim blur (wheel spin blur, below), which is
-made for a flat rim's image. The menus' and the race files' GTTR repeats,
+race level 0: about 5,200 more triangles a car with four wheels. GT3's rim
+blur (wheel spin blur, below) is made for a flat rim's image: the races blur a
+modelled rim with turned copies of it instead (docs/dev/RACE.md). The menus' and the race files' GTTR repeats,
 flags and shininess are the same on every car, so the tread blur reads the
 menus' tyre as it does the race's.
 

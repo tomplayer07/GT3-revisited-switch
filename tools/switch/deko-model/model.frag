@@ -54,6 +54,7 @@ void main() {
         vec3 environment=t<0.5 ? mix(ground,horizon,t*2) : mix(horizon,sky,t*2-1);
         if (eyeDirection.w>0.5) environment=sceneEnvironment(reflected);
         float alpha=color.a*(params.x>0.5 ? texture(image,uv).a : 1);
+        if (matAmbient.w>2.5 && alpha>254.0/255.0) discard;
         outputColor=vec4(environment*clamp(color.rgb*weight,vec3(0),vec3(255.0/128.0))*envC1.w*(1-clamp(fogAmount,0,1)),alpha);
         return;
     }

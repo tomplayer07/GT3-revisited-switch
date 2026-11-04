@@ -20,8 +20,10 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace gt3r::render {
@@ -87,6 +89,16 @@ struct DrawOptions {
     // The view or projection mirrors the image (rear-view mirror, cube faces): front faces
     // wind the other way, so back-face culling is swapped.
     bool mirrored = false;
+    // GT3's guard band (presentation §M6), > 0: DrawItem::guard_band items' triangles with a vertex
+    // beyond |x| = 2 w or |y| = 2 w of clip space, or nearer than this (metres: GT3's near plane,
+    // 0.07 x the projection's zoom), are drawn from the pieces GT3's VU clips them into
+    // (render/guard_band.h). draw() only.
+    float guard_near = 0;
+    // GT3's far plane (presentation §G, §M6: metres of eye depth, Env0 +0x20), > 0: what lies
+    // beyond it is not drawn. A mesh wholly beyond is culled, the guard band clips its items'
+    // triangles there, and the other items' are cut at it like the GPU's own far plane. Background
+    // items are not cut; an item's modelview scale moves its plane (the backdrop: 100 x as far).
+    float far_clip = 0;
     float wire_color[4] = {0.55f, 0.95f, 0.55f, 1.0f};
     // Large scenes (race): skip meshes whose bounding sphere is outside the
     // view frustum or further than `draw_distance` (0 = unlimited) from the eye.
@@ -122,13 +134,12 @@ struct DrawOptions {
     // The replay depth of field (presentation §G17), before the passes above and below: the picture
     // rebuilt from itself and blurred copies of it by the scene's depth (dof_layers), for a lens
     // of `focal_mm` (a film 1.333 times as wide as high whose diagonal is the focal length; its
-    // focal length at this view's zoom from the projection's vertical scale x `y_scale`), the
+    // focal length at this view's zoom from the projection's vertical scale), the
     // f-number `f_number`, focused `focus` metres from the eye. Nothing beyond `far` metres
     // (the original's far plane) gets more blur than at it. Not drawn by draw_to.
     struct DepthOfField {
         bool on = false;
         float f_number = 10, focal_mm = 35, focus = 10, far = 1000;
-        float y_scale = 1; // the original's projection's vertical scale over this one's
     } dof;
     // --- The passes between the 3D scene and the grade, and the vignette (GT3's frame order,
     // presentation §L6): the heat haze lenses, the DrawItem::late items (the tyre smoke), the
@@ -151,6 +162,12 @@ struct DrawOptions {
 
 // The grade pass's arithmetic on one 8-bit pixel: model.frag's gt3_grade on the CPU (tests).
 std::array<u8, 3> post_grade_pixel(const DrawOptions::PostGrade& g, u8 r, u8 gr, u8 b);
+
+// The GS's 8-bit arithmetic on one textured, fogged pixel: model.frag's gs_texel, gs_color and
+// gs_fog on the CPU (tests). `texel` as the texture filter returns it (0..255, fractional between
+// texels), `color` the vertex colour in GS units (0x80 = 1.0, fractional where interpolated),
+// `fog` FOGCOL, `f` the fog coefficient F (255: no fog; 256 here: a pass without fog).
+std::array<u8, 3> gs_pixel(const float texel[3], const float color[3], const u8 fog[3], float f);
 
 // One layer of the depth of field (presentation §G17), in drawing order: level `level` (0..4) of
 // the downsampled pictures, or the sharp picture itself (-1), drawn at weight `alpha` wherever the
@@ -185,6 +202,25 @@ DofBlur dof_level_blur(int level);
 // the GS colour bytes (low 8 bits of s Ls Ms c, s = 128 x scale).
 std::array<u8, 3> sheen_vertex_bytes(const scene::Material& m, const Vec3& light, const float light_spec[3],
                                      const Vec3& viewer, const Vec3& pos, const Vec3& normal);
+
+// The GS's bilinear filter on one channel of an 8-bit image (DrawItem::gs_bilinear): model.frag's
+// gs_bilinear on the CPU (tests). `u`, `v` in texels (texel centres at + 0.5), clamped addressing.
+u8 gs_bilinear_texel(const u8* px, int w, int h, float u, float v);
+// A modelled rim's turned copies (DrawItem::spin_turn) share out the picture's samples: a pixel's
+// samples hold that many copies, and `cells` (1..16, a power of two) cells of a 4 x 4 ordered
+// pattern of pixels the rest, cells x samples copies in all. spin_copy_at is the copy drawing sample
+// `sample` of pixel (x, y): model.frag's spin_copy_samples on the CPU (tests).
+int spin_copy_at(int x, int y, int sample, int cells);
+// How many copies a rim `radius_px` pixels across (its radius) is drawn as whose copies spread
+// `spread_px` pixels at its edge, at `samples` a pixel (1 without sample masks): powers of two from
+// `samples` up while they would lie more than 1.5 pixels apart, at most 16 cells and as many as
+// lie 1.5 pixels apart over a radian of its edge (a small rim's blur hides its spokes sooner; 64
+// from 96 pixels).
+int spin_copy_count(float spread_px, float radius_px, int samples);
+// The pixels the cells' pattern repeats over (1: one cell; 2 x 2 up to 4 cells, else 4 x 4), and so
+// the taps of View3D's filter weighing every cell alike: two bilinear taps a pixel apart each way
+// (a 3 x 3 tent, 1 2 1) or four (1 2 2 2 1).
+int spin_copy_period(int cells);
 
 // Per-draw counters (last View3D::draw call).
 struct DrawStats {
@@ -242,6 +278,10 @@ struct DrawItem {
     // opaque meshes follow that item's opaque ones, its blended ones that item's blended ones
     // (the course's moving nodes, gtm1::AnimatedNodes, with the scenery they were taken from).
     bool in_order_join = false;
+    // With in_order: once the item (with the items joined to it) is drawn, the depth buffer is
+    // reset to the far plane's, as GT3 resets its Z after the course backdrop (slot 22): the
+    // items after it cover it wherever its planes lie (presentation §M2, frame order).
+    bool depth_reset = false;
     // The PS2's frame-buffer alpha (course scenery): every pass writes its fragment alpha (texel x
     // vertex alpha) unless flagged kKeepAlpha, kAlphaOnly passes write only it, and
     // kAdditive | kDestAlphaAdd passes (the road sheen) are weighted by it (GS ALPHA 0x58,
@@ -257,6 +297,10 @@ struct DrawItem {
     // Samples this texture (bilinear, clamped) instead of the primitives' own, e.g. an
     // offscreen buffer from View3D::render_offscreen.
     SDL_GPUTexture* texture = nullptr;
+    // With texture: filtered as the GS does it (bilinear with 4-bit weights, each lerp truncated
+    // to a whole 8-bit level), for a buffer that holds whole levels: GT3's wet-road blur copies
+    // and composite (race/wet_road.h).
+    bool gs_bilinear = false;
     // Blended primitives weighted by the frame-buffer alpha instead (PS2 ALPHA): 1 = 0x54,
     // (Cs - Cd) Ad + Cd; 2 = 0x58, Cs Ad + Cd. The frame alpha is kept.
     u8 dest_alpha_blend = 0;
@@ -278,8 +322,22 @@ struct DrawItem {
     float wheel_blur_lod = 0;
     float wheel_blur_alpha_ref = -1;
     std::array<float, 4> wheel_steps{};
+    // Not 0: a modelled rim's spin blur (race::CarVisual). The item is drawn as copies of itself
+    // turned about its own x axis (the axle) by k / n of this turn (radians), k = 0..n - 1, n from
+    // its size on screen (spin_copy_count), each into its own share of the picture's samples
+    // (spin_copy_at): each pixel resolves to the mean of the copies it holds, and each copy's own
+    // depth keeps what lies behind it sharp. The main view then evens out the cells over the rim
+    // (spin_resolve). Without the shader variant (GpuContext::spin_copies) it is drawn once, plain.
+    float spin_turn = 0;
     // Not fogged (a GS pass without FGE: the brake rotor's glow).
     bool no_fog = false;
+    // GT3's cars pass (DrawOptions::far_clip): the model is dropped whole once any of it reaches
+    // past the far plane (its node box test), not cut at the plane.
+    bool far_whole = false;
+    // Clipped as GT3 does at the guard band (DrawOptions::guard_near; the model keeps its
+    // geometry: GpuModel's keep_geometry), the vertex colour linear in screen space as the GS
+    // interpolates it. The triangles are taken in strip order: their indices ascending (gtm1).
+    bool guard_band = false;
 };
 
 class View3D {
@@ -330,7 +388,6 @@ private:
     void write_capture();
     bool ensure_target(SDL_Renderer* renderer, int w, int h);
     void release_target();
-    SDL_Texture* wrap(SDL_Renderer* renderer, SDL_GPUTexture* texture, int w, int h);
     bool ensure_half(SDL_Renderer* renderer);
     bool ensure_cube(int size);
     void release_cube();
@@ -356,6 +413,29 @@ private:
     void encode_after_scene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& view, const Mat4& proj,
                             const Vec3& eye, const std::vector<DrawItem>& items, const DrawOptions& o,
                             const ScreenUpload& up);
+    // GT3's guard band (DrawOptions::guard_near): the corners of the clipped triangles of this
+    // draw's DrawItem::guard_band items (ClipVertex) and their triangles per (item, mesh,
+    // primitive), uploaded before the scene pass; encode draws each after the primitive's own draw.
+    // False when nothing could be uploaded (the static draws then keep every triangle).
+    bool upload_clipped(SDL_GPUCommandBuffer* cmd, const Mat4& view, const Mat4& proj, const Vec3& eye,
+                        const std::vector<DrawItem>& items, const DrawOptions& o);
+    struct ClipRange {
+        u32 first = 0, count = 0;
+    };
+    std::map<std::tuple<const DrawItem*, const GpuModel::MeshInfo*, size_t>, ClipRange> clipped_;
+    bool guard_on_ = false; // this draw's guard-band items are clipped (encode)
+    // A vertex and an index buffer refilled every draw, through one transfer buffer (each grown to
+    // twice its size when too small).
+    struct Streamed {
+        SDL_GPUBuffer *vb = nullptr, *ib = nullptr;
+        SDL_GPUTransferBuffer* tb = nullptr;
+        u32 vb_size = 0, ib_size = 0, tb_size = 0;
+        void release(SDL_GPUDevice* dev);
+        // Copies `vsize` bytes of vertices and `isize` of indices into them, in a copy pass on `cmd`.
+        bool upload(SDL_GPUDevice* dev, SDL_GPUCommandBuffer* cmd, const void* verts, u32 vsize, const void* idx,
+                    u32 isize);
+    };
+    Streamed clip_; // the clipped corners (ClipVertex) and their triangles
     // The post-process passes (DrawOptions::post_grade, dissolve, trail).
     bool post_wanted(const DrawOptions& o) const;
     bool ensure_post(SDL_GPUTexture** t);
@@ -367,6 +447,20 @@ private:
     // The depth of field (DrawOptions::dof): from scene_ (the picture) and depth_ (its depth, kept
     // by the scene pass), the downsampled pictures, then the layers into `out` (the picture's size).
     bool dof_wanted(const DrawOptions& o) const { return o.dof.on && o.dof.focus > 0; }
+    // The modelled rims the scene pass drew as turned copies (DrawItem::spin_turn), in normalised
+    // device coordinates, with how far the copies spread at the rim's edge (pixels) and their cells'
+    // spin_copy_period. After the scene, spin_resolve lays the cell-evening filter over each.
+    struct SpinRect {
+        const DrawItem* item = nullptr;
+        float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        float spread_px = 0;
+        int period = 1;
+    };
+    std::vector<SpinRect> spin_rects_;
+    // The main view's scene pass: pixels per unit of x in normalised device coordinates (half the
+    // picture's width), for spin_copy_count and spin_rects_. 0 elsewhere: a copy a sample, no rects.
+    float spin_px_ = 0;
+    void spin_resolve(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* picture, int pw, int ph, bool cycle);
     bool ensure_dof_levels(float aspect, int pw, int ph);
     void encode_dof(SDL_GPUCommandBuffer* cmd, const DrawOptions& o, const Mat4& proj, float aspect,
                     SDL_GPUTexture* out, bool cycle);
@@ -405,11 +499,9 @@ private:
     bool last_valid_ = false, snap_valid_ = false;
     int last_w_ = 0, last_h_ = 0, snap_w_ = 0, snap_h_ = 0; // their pictures' sizes
     SDL_GPUBuffer *quad_vb_ = nullptr, *quad_ib_ = nullptr;
-    // The screen geometry of the passes after the scene (one buffer pair, refilled per draw), and
-    // the picture's copy the haze lenses sample.
-    SDL_GPUBuffer *screen_vb_ = nullptr, *screen_ib_ = nullptr;
-    SDL_GPUTransferBuffer* screen_tb_ = nullptr;
-    u32 screen_vb_size_ = 0, screen_ib_size_ = 0, screen_tb_size_ = 0;
+    // The screen geometry of the passes after the scene (refilled per draw), and the picture's copy
+    // the haze lenses sample.
+    Streamed screen_;
     SDL_GPUTexture* haze_src_ = nullptr;
     // The depth of field's downsampled pictures (each `w` x `h` in the corner of a `cap_w` wide
     // texture) and its result when the post-process passes follow.

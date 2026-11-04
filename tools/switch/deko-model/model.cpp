@@ -1048,10 +1048,12 @@ struct Model::Impl {
         }
         const auto eyeDirection=render::normalize(render::Vec3{view.at(2,0),view.at(2,1),view.at(2,2)});
         size_t draw = 0, triangles=0, uniformBytes=0, stateChanges=0;
-        int lastDepth=-1, lastBlend=-1, lastCull=-1;
+        int lastDepth=-1, lastBlend=-1, lastCull=-1, lastDepthOnly=-1;
         uint32_t lastTexture=UINT32_MAX;
         unsigned lastCar=UINT32_MAX;
-        for (unsigned pass = 0; pass < 4; ++pass) for (size_t meshIndex=0;meshIndex<meshes.size();++meshIndex) {
+        // Opaque scene first, then course blending, then each car's transparent,
+        // reflection and depth-only packets in their original order.
+        for (unsigned pass = 0; pass < 3+carCount; ++pass) for (size_t meshIndex=0;meshIndex<meshes.size();++meshIndex) {
             if (!visibleMeshes[meshIndex]) continue;
             const auto& mesh=meshes[meshIndex];
             if (mesh.sky!=(pass==0)) continue;
@@ -1066,15 +1068,25 @@ struct Model::Impl {
                 const auto& p = primitives[mesh.firstPrimitive+i];
                 const bool maskDebug=courseMaskView && !mesh.car && !mesh.sky && !capturing;
                 const bool reflection=(p.flags&((1u<<1)|(1u<<4)))==((1u<<1)|(1u<<4));
+                const bool depthOnly=(p.flags&scene::kDepthOnly)!=0;
+                const bool transparent=reflection || depthOnly || (p.flags&scene::kAlphaBlend);
+                if (mesh.car) {
+                    if (transparent ? pass!=3+mesh.carIndex : pass!=1) continue;
+                } else if (pass>=3) continue;
                 if (reflection) {
-                    if (capturing || !reflections || !environmentReady || pass!=3) continue;
+                    if (capturing || !reflections || !environmentReady) continue;
                 } else {
                     // Other additive/course-mask passes still need their own handling.
                     if (p.flags&((1u<<1)|(1u<<4)|(1u<<9)|(1u<<10))) continue;
-                    if (!mesh.sky && (bool(p.flags&1)!=(pass==2) || pass==3)) continue;
+                    if (!mesh.sky && !mesh.car && bool(p.flags&1)!=(pass==2)) continue;
                 }
-                const bool blended=!maskDebug && (reflection || (p.flags&1));
+                const bool blended=!maskDebug && !depthOnly && (reflection || (p.flags&1));
                 if (!p.count) continue;
+                if (lastDepthOnly!=int(depthOnly)) {
+                    DkColorWriteState colorWrite; dkColorWriteStateDefaults(&colorWrite);
+                    if (depthOnly) dkColorWriteStateSetMask(&colorWrite,0,0);
+                    dkCmdBufBindColorWriteState(cmd,&colorWrite); lastDepthOnly=int(depthOnly); ++stateChanges;
+                }
                 // Honour original single/double-sided course packets. Car and
                 // sky rasterization retain their already tested bring-up state.
                 const bool cull=courseCulling && !mesh.car && !mesh.sky && !(p.flags&scene::kDoubleSided);
@@ -1136,7 +1148,7 @@ struct Model::Impl {
                 // Generic/prelit draws read only through matAmbient.w (offset 156).
                 // Zero validity disables all shader reads of the omitted tail.
                 if (reflection) {
-                    values[34]=2; values[39]=0;
+                    values[34]=2; values[39]=(p.flags&scene::kDestAlphaTest) ? 3 : 0;
                     values[52]=eye.x; values[53]=eye.y; values[54]=eye.z; values[55]=environmentReady ? 1 : 0;
                     std::memcpy(values+56,p.env,sizeof(p.env)); values[63]=0.4f;
                 }

@@ -570,6 +570,32 @@ TEST(wheel_model_disc) {
     CHECK(n == 3);
 }
 
+// The rim's runtime texture slot holds the rim image (texture table entry 1, issue 159): on the
+// Miata LS the current set's first texture is a dark copy under another palette, a flat disc.
+TEST(wheel_rim_image_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Bytes data = disc->volume().read(*disc->volume().find("wheel/ma2096"));
+    const gtm1::Gtm1 g = gtm1::Gtm1::parse(WheelFile::parse(data).gtm1);
+    CHECK(!g.texset_tables.empty() && g.texset_tables[0].size() > 1);
+    if (g.texset_tables.empty() || g.texset_tables[0].size() <= 1) return;
+    std::vector<scene::Texture> image;
+    gtm1::decode_texture_set(g.data.subspan(g.texsets[g.texset_tables[0][1]]), image, "");
+    CHECK(!image.empty());
+    if (image.empty()) return;
+    auto shows_image = [&](int runtime_set) {
+        gtm1::Options o;
+        o.runtime_set = runtime_set;
+        const scene::Model m = load_wheel_model(data, o);
+        for (const scene::Mesh& mesh : m.meshes)
+            for (const scene::Primitive& p : mesh.primitives)
+                if (p.texture >= 0 && m.textures[size_t(p.texture)].rgba == image[0].rgba) return true;
+        return false;
+    };
+    CHECK(shows_image(1));
+    CHECK(!shows_image(-1));
+}
+
 TEST(car_paint_variants_disc) {
     Disc* disc = test::test_disc();
     if (!disc) SKIP("needs GT3R_DISC");
@@ -889,11 +915,6 @@ TEST(showroom_wheels_in_race_disc) {
             CHECK(!verts(showroom, n, 0).empty() && verts(showroom, n, 0) == verts(menu, n, 0));
             for (int lod = 1; lod < lods; ++lod) CHECK(verts(showroom, n, lod) == verts(race, n, lod));
         }
-    // LOD 0's race rims beside them, for the spin blurs; none without showroom wheels.
-    for (const std::string w : {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"}) {
-        CHECK(!verts(showroom, w + "_race", 0).empty() && verts(showroom, w + "_race", 0) == verts(race, w, 0));
-        CHECK(verts(showroom, w + "_race", 1).empty() && verts(race, w + "_race", 0).empty());
-    }
     CHECK(triangles(showroom, "wheel_fl", 0) > 4 * triangles(race, "wheel_fl", 0)); // modelled spokes
     CHECK(verts(showroom, "body", 0) == verts(race, "body", 0));
     // No brake parts: races draw race/brake.bin's.
@@ -920,7 +941,6 @@ TEST(showroom_wheels_in_race_disc) {
     CHECK(verts(showroom_fitted, "wheel_fl", 0) == verts(menu_fitted, "wheel_fl", 0));
     CHECK(verts(showroom_fitted, "wheel_fl", 0) != verts(showroom, "wheel_fl", 0));
     CHECK(verts(showroom_fitted, "wheel_fl", 1) == verts(race_fitted, "wheel_fl", 1));
-    CHECK(verts(showroom_fitted, "wheel_fl_race", 0) == verts(race_fitted, "wheel_fl", 0));
     sf.showroom_wheel = {};
     const scene::Model no_menu_model = load_car_model(race_file, sf, "mb0007");
     CHECK(verts(no_menu_model, "wheel_fl", 0) == verts(race_fitted, "wheel_fl", 0));

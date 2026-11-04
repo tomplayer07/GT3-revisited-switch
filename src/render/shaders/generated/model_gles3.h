@@ -11,17 +11,41 @@ precision highp samplerCube;
 // Model vertex shader. SDL_GPU binding rules for SPIR-V vertex shaders:
 // uniform buffers live in descriptor set 1.
 
+#ifdef CLIPPED
+// A corner of a triangle GT3's VU clips at the guard band (render/guard_band.h, View3D): the
+// triangle's three vertices and the corner's weights of them (clip-space interpolation).
+layout(location = 0) in vec3 a_pos0;
+layout(location = 1) in vec3 a_normal0;
+layout(location = 2) in vec2 a_uv0;
+layout(location = 3) in vec4 a_color0;
+layout(location = 4) in vec3 a_pos1;
+layout(location = 5) in vec3 a_normal1;
+layout(location = 6) in vec2 a_uv1;
+layout(location = 7) in vec4 a_color1;
+layout(location = 8) in vec3 a_pos2;
+layout(location = 9) in vec3 a_normal2;
+layout(location = 10) in vec2 a_uv2;
+layout(location = 11) in vec4 a_color2;
+layout(location = 12) in vec3 a_weights;
+#else
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
 layout(location = 3) in vec4 a_color;
+#endif
 
 layout(std140) uniform VertexUniforms {
     mat4 mvp;
     mat4 model;      // object -> world
     mat4 normal_mat; // inverse-transpose of model (upper 3x3 used)
     vec4 view_z;     // the view matrix's z row: eye-space z = dot(xyz, world) + w
-    vec4 fog;        // GT3 fog (z = 1): x distance A, y 1 - minimum visibility b
+    vec4 fog;        // GT3 fog (z = 1): x distance A, y 1 - minimum visibility b; w > 0: GT3's
+                     // guard band (DrawItem::guard_band), w its near plane in eye depth
+    vec4 far_clip;   // x > 0: GT3's far plane in eye depth (DrawOptions::far_clip)
+    // The SPIN_COPIES variant (a DrawItem::spin_turn rim's copies, one an instance): instance k
+    // turned by -k x spin_axis.w about the axis spin_axis.xyz through spin_pivot (model space).
+    vec4 spin_axis;
+    vec4 spin_pivot;
 } u;
 
 // GT3's VU lighting, evaluated per vertex (set when the primitive has a scene::Material):
@@ -50,7 +74,9 @@ layout(std140) uniform VertexLighting {
 
 out vec3 v_normal;
 out vec2 v_uv;
-out vec4 v_color;
+// The vertex colour; times the clip w with the guard band (u.fog.w > 0): linear in screen space,
+// as the GS interpolates it (model.frag).
+out vec4 v_color_in;
 out vec3 v_world;
 // GT3's lighting factor (texel or 1 x this) and fog amount, per vertex. The GS interpolates both
 // linearly in screen space, not perspective-correct: they go out times the clip w, and
@@ -58,40 +84,43 @@ out vec3 v_world;
 // interpolation into a linear one in screen space, clipped triangles included. That is what
 // noperspective does, but the shader compiler of a Mali-G52 driver (r25p1) crashed on it.
 out vec3 v_lit_w;
-out float v_fog_w;
+// x: the fog amount times the clip w; y > 0: not drawn here (model.frag discards it), a triangle
+// GT3 clips at the guard band in the static draw, or one it does not in the clipped draw; for the
+// other items the depth past GT3's far plane (cut there, as the GPU cuts at its own).
+out vec2 v_fog_w;
+#ifdef SPIN_COPIES
+layout(location = 6) flat out int v_copy; // the copy (model.frag's spin_copy_samples)
+#endif
 
-vec3 v_lit;
-// 1 - F / 255, from the view depth W like the VU's transform: F = trunc(b' + 0.1 +
-// (255 - b') min(W, A) / W), b' = 255 b.
-float v_fog;
+// One vertex as GT3's VU program leaves it: the clip position, the colour and the lighting factor.
+struct Vert {
+    vec4 clip;
+    vec3 world;
+    vec3 normal;
+    vec2 uv;
+    vec4 color;
+    vec3 lit;
+};
 
-void main() {
-    gl_Position = u.mvp * vec4(a_pos, 1.0);
-    // SDL_GPU depth [0,1] -> OpenGL clip depth [-1,1].
-    gl_Position.z = gl_Position.z * 2.0 - gl_Position.w;
-    v_world = (u.model * vec4(a_pos, 1.0)).xyz;
-    v_normal = mat3(u.normal_mat) * a_normal;
-    v_uv = a_uv;
+Vert vertex(vec3 pos, vec3 nrm, vec2 uv, vec4 a_col) {
+    Vert o;
+    o.clip = u.mvp * vec4(pos, 1.0);
+    o.world = (u.model * vec4(pos, 1.0)).xyz;
+    o.normal = mat3(u.normal_mat) * nrm;
+    o.uv = uv;
     // The GS's texel x colour >> 7: 0x80 = 1.0 and past it up to 255/128 (scene::kVertexColor2x);
     // other packets store 0x80 as 1.0.
-    vec4 color = l.vertex_color.x > 0.5 ? vec4(a_color.rgb * (255.0 / 128.0), a_color.a) : a_color;
-    v_color = color;
-    v_fog = 0.0;
-    if (u.fog.z > 0.5) {
-        float W = max(-(dot(u.view_z.xyz, v_world) + u.view_z.w), 1e-4);
-        float b = clamp(255.0 * (1.0 - u.fog.y), 0.0, 255.0);
-        float F = floor(b + 0.1 + (255.0 - b) * min(W, u.fog.x) / W);
-        v_fog = 1.0 - min(F, 255.0) / 255.0;
-    }
+    vec4 color = l.vertex_color.x > 0.5 ? vec4(a_col.rgb * (255.0 / 128.0), a_col.a) : a_col;
+    o.color = color;
     // GT3: Me + La Ma + sum Ld Md max(N.L, 0) + sum Ls Ms max(N.H, 0)^p (H with the infinite
     // viewer), times the packet scale, clamped to 255/128 per vertex; the GS interpolates
     // the result across the triangle (Gouraud) and modulates the texel with it.
-    v_lit = vec3(1.0);
+    o.lit = vec3(1.0);
     if (l.eye_dir.w > 2.5) {
         // GT3's environment programs (course chunk kinds 2 and 3): from the camera E,
         // D = vertex - E, R = D - 2 (D.N) N with the normal as stored (the UV slot's).
-        vec3 n = v_normal;
-        vec3 D = v_world - l.eye_dir.xyz;
+        vec3 n = o.normal;
+        vec3 D = o.world - l.eye_dir.xyz;
         float p = 1.0 / max(length(D), 1e-6);
         vec3 R = D - 2.0 * dot(D, n) * n;
         if (l.eye_dir.w < 3.5) {
@@ -99,7 +128,7 @@ void main() {
             // m = |R_eye + (0, 0, 1)|, s = 0.5 + 0.5 Rx / m, t = 0.5 - 0.5 Ry / m.
             vec3 e = vec3(dot(l.env_rows[0].xyz, R), dot(l.env_rows[1].xyz, R), dot(l.env_rows[2].xyz, R)) * p;
             float m = max(length(e + vec3(0.0, 0.0, 1.0)), 1e-6);
-            v_uv = vec2(0.5 + 0.5 * e.x / m, 0.5 - 0.5 * e.y / m);
+            o.uv = vec2(0.5 + 0.5 * e.x / m, 0.5 - 0.5 * e.y / m);
         } else {
             // Kind 3: the panoramic lookup. r = R in the yawed frame; u from the quadrant of
             // (r.x - r.z, r.x + r.z), continuous mod 8; y = r.y / |D|, v = y^3 + 2 y.
@@ -110,24 +139,24 @@ void main() {
             else if (a < 0.0) u = 4.0 + r.z / r.x;
             else u = 6.0 - r.x / r.z;
             float y = r.y * p;
-            v_uv = vec2(l.env_pano.x - u / 8.0, l.env_pano.z - l.env_pano.y * (y * y * y + 2.0 * y));
+            o.uv = vec2(l.env_pano.x - u / 8.0, l.env_pano.z - l.env_pano.y * (y * y * y + 2.0 * y));
         }
         // The colour, alpha too: c_v x (C0 + C1 min(D.N / |D|, 0)).
-        v_color = color * (l.env_c0 + l.env_c1 * min(dot(D, n) * p, 0.0));
+        o.color = color * (l.env_c0 + l.env_c1 * min(dot(D, n) * p, 0.0));
     } else if (l.eye_dir.w > 1.5) {
         // The road sheen's VU program (course chunk kind 4): the first light's specular term
         // only, Phong with the reflected ray from the viewer: D = vertex - viewer,
         // R = D - 2 (D.N) N, c = max(0, L.R / |D|)^p (the normal as stored). The byte
         // s Ls Ms c (s = 128 or 255) is not clamped: the GS takes its low 8 bits.
-        vec3 n = v_normal;
-        vec3 D = v_world - l.eye_dir.xyz;
+        vec3 n = o.normal;
+        vec3 D = o.world - l.eye_dir.xyz;
         vec3 R = D - 2.0 * dot(D, n) * n;
         float c = max(dot(normalize(l.light_dir[0].xyz), R) / max(length(D), 1e-6), 0.0);
         vec3 byte_ = floor(l.light_specular[0].rgb * l.mat_specular.rgb * (128.0 * l.mat_diffuse.w) *
                            pow(c, l.mat_specular.w));
-        v_lit = mod(byte_, 256.0) / 128.0 * l.mat_emission.w;
+        o.lit = mod(byte_, 256.0) / 128.0 * l.mat_emission.w;
     } else if (l.eye_dir.w > 0.5) {
-        vec3 n = normalize(v_normal);
+        vec3 n = normalize(o.normal);
         vec3 E = normalize(l.eye_dir.xyz);
         vec3 lit = l.mat_emission.rgb + l.light_ambient.rgb * l.mat_ambient.rgb;
         for (int i = 0; i < 4; ++i) {
@@ -138,10 +167,72 @@ void main() {
                 lit += l.light_specular[i].rgb * l.mat_specular.rgb *
                        pow(max(dot(n, normalize(L + E)), 0.0), l.mat_specular.w);
         }
-        v_lit = clamp(lit * l.mat_diffuse.w, 0.0, 255.0 / 128.0) * l.mat_emission.w;
+        o.lit = clamp(lit * l.mat_diffuse.w, 0.0, 255.0 / 128.0) * l.mat_emission.w;
     }
-    v_lit_w = v_lit * gl_Position.w;
-    v_fog_w = v_fog * gl_Position.w;
+    return o;
+}
+
+// 1 - F / 255, from the view depth W like the VU's transform: F = trunc(b' + 0.1 +
+// (255 - b') min(W, A) / W), b' = 255 b. A corner GT3 clips gets its own (from its own W).
+float fog_at(vec3 world) {
+    if (u.fog.z < 0.5) return 0.0;
+    float W = max(-(dot(u.view_z.xyz, world) + u.view_z.w), 1e-4);
+    float b = clamp(255.0 * (1.0 - u.fog.y), 0.0, 255.0);
+    float F = floor(b + 0.1 + (255.0 - b) * min(W, u.fog.x) / W);
+    return 1.0 - min(F, 255.0) / 255.0;
+}
+
+// GT3's guard band (render/guard_band.h): beyond |x| = 2 w or |y| = 2 w, nearer than its near plane
+// or farther than its far plane.
+bool outside(vec4 c) {
+    return c.w < u.fog.w || abs(c.x) > 2.0 * c.w || abs(c.y) > 2.0 * c.w || (u.far_clip.x > 0.0 && c.w > u.far_clip.x);
+}
+
+void main() {
+#ifdef CLIPPED
+    Vert a = vertex(a_pos0, a_normal0, a_uv0, a_color0);
+    Vert b = vertex(a_pos1, a_normal1, a_uv1, a_color1);
+    Vert c = vertex(a_pos2, a_normal2, a_uv2, a_color2);
+    vec3 k = a_weights;
+    gl_Position = k.x * a.clip + k.y * b.clip + k.z * c.clip;
+    v_world = k.x * a.world + k.y * b.world + k.z * c.world;
+    v_normal = k.x * a.normal + k.y * b.normal + k.z * c.normal;
+    v_uv = k.x * a.uv + k.y * b.uv + k.z * c.uv;
+    vec4 color = k.x * a.color + k.y * b.color + k.z * c.color;
+    vec3 lit = k.x * a.lit + k.y * b.lit + k.z * c.lit;
+    if (max(k.x, max(k.y, k.z)) < 1.0) {
+        // A new corner: the VU lerps the GS bytes (0x80 = 1.0) and rounds them (+ 0.5, truncated).
+        color = floor(color * 128.0 + 0.5) / 128.0;
+        float e = l.mat_emission.w > 0.0 ? l.mat_emission.w : 1.0;
+        lit = floor(lit / e * 128.0 + 0.5) / 128.0 * e;
+    }
+    // The static draw has this triangle unless the GPU sees it cross the guard band too.
+    float drop = outside(a.clip) || outside(b.clip) || outside(c.clip) ? 0.0 : 1.0;
+#else
+    vec3 pos = a_pos, normal = a_normal;
+#ifdef SPIN_COPIES
+    v_copy = gl_InstanceID;
+    float t = -u.spin_axis.w * float(gl_InstanceID), co = cos(t), si = sin(t);
+    vec3 ax = u.spin_axis.xyz, d = pos - u.spin_pivot.xyz;
+    pos = u.spin_pivot.xyz + d * co + cross(ax, d) * si + ax * dot(ax, d) * (1.0 - co);
+    normal = normal * co + cross(ax, normal) * si + ax * dot(ax, normal) * (1.0 - co);
+#endif
+    Vert o = vertex(pos, normal, a_uv, a_color);
+    gl_Position = o.clip;
+    v_world = o.world;
+    v_normal = o.normal;
+    v_uv = o.uv;
+    vec4 color = o.color;
+    vec3 lit = o.lit;
+    // The clipped draw has the triangles with a vertex beyond the guard band (View3D); the other
+    // items are cut at the far plane.
+    float drop = u.fog.w > 0.0 ? (outside(o.clip) ? 1.0 : 0.0) : u.far_clip.x > 0.0 ? o.clip.w - u.far_clip.x : 0.0;
+#endif
+    // SDL_GPU depth [0,1] -> OpenGL clip depth [-1,1].
+    gl_Position.z = gl_Position.z * 2.0 - gl_Position.w;
+    v_color_in = u.fog.w > 0.0 ? color * gl_Position.w : color;
+    v_lit_w = lit * gl_Position.w;
+    v_fog_w = vec2(fog_at(v_world) * gl_Position.w, drop);
 }
 )GLSL";
 
@@ -155,12 +246,18 @@ precision highp samplerCube;
 
 in vec3 v_normal;
 in vec2 v_uv;
-in vec4 v_color;
+in vec4 v_color_in;
 in vec3 v_world;
 // GT3's lighting factor and fog amount per vertex, times the clip w (model.vert): with
-// gl_FragCoord.w (1 / w), interpolated linearly in screen space like the GS.
+// gl_FragCoord.w (1 / w), interpolated linearly in screen space like the GS. v_fog_w.y > 0: the
+// triangle is drawn by the other draw (GT3's guard band: model.vert), or the point lies past GT3's
+// far plane.
 in vec3 v_lit_w;
-in float v_fog_w;
+in vec2 v_fog_w;
+vec4 v_color; // the vertex colour (u.output_mode.y = 1: it came times the clip w, as v_lit_w)
+#ifdef SPIN_COPIES
+layout(location = 6) flat in int v_copy; // the copy (model.vert's instance)
+#endif
 vec3 v_lit;
 float v_fog;
 
@@ -212,10 +309,13 @@ layout(std140) uniform FragmentUniforms {
                          // w 1 = write alpha 1 (coverage) for this opaque primitive
     vec4 env_c0;         // GT3 reflection weight rows: c0 + c1 min(V.N, 0) per channel;
     vec4 env_c1;         // env_c0.w = 1: valid (else the scalar env_sky.w term)
-    vec4 output_mode;    // x = 1: store 5 bits per channel (GT3's PSMCT16 reflection map)
+    vec4 output_mode;    // x = 1: store 5 bits per channel (GT3's PSMCT16 reflection map);
+                         // y = 1: the vertex colour is linear in screen space (GT3's guard band);
+                         // z = 1: the texture filtered as the GS does (gs_bilinear below);
+                         // w = 1: a car reflection pass with GS TEST.DATE (drawn where Ad < 0x80)
     // GT3's wheel spin blurs (DrawItem::wheel_blur; wheel_texture below): x 1 = the tyre's tread,
     // 2 = the rim; y the rim's mip level. wheel_steps: the tread's three S shifts / the rim's
-    // four angles.
+    // four angles. The SPIN_COPIES variant: w the copies' cells (DrawItem::spin_turn).
     vec4 wheel_blur;
     vec4 wheel_steps;
 } u;
@@ -243,7 +343,22 @@ vec2 rim_turn(vec2 r, int k, int bit, float a) {
     return vec2(r.x * c - r.y * s, r.x * s + r.y * c);
 }
 
+// The texture as the GS filters it (DrawItem::gs_bilinear): the four texels around uv (clamped)
+// weighted by the 4-bit fractions of its position, across then down, each lerp truncated to a
+// whole 8-bit level, a + ((b - a) f >> 4). The texture holds whole levels (an offscreen buffer).
+vec4 gs_bilinear(vec2 uv) {
+    ivec2 size = textureSize(u_tex, 0);
+    vec2 t = uv * vec2(size) - 0.5, i = floor(t);
+    vec2 f = min(floor((t - i) * 16.0 + 1e-3), vec2(15.0));
+    ivec2 p0 = clamp(ivec2(i), ivec2(0), size - 1), p1 = clamp(ivec2(i) + 1, ivec2(0), size - 1);
+    vec4 a = floor(texelFetch(u_tex, p0, 0) * 255.0 + 0.5), b = floor(texelFetch(u_tex, ivec2(p1.x, p0.y), 0) * 255.0 + 0.5);
+    vec4 c = floor(texelFetch(u_tex, ivec2(p0.x, p1.y), 0) * 255.0 + 0.5), d = floor(texelFetch(u_tex, p1, 0) * 255.0 + 0.5);
+    vec4 top = a + floor((b - a) * f.x / 16.0), bottom = c + floor((d - c) * f.x / 16.0);
+    return (top + floor((bottom - top) * f.y / 16.0)) / 255.0;
+}
+
 vec4 wheel_texture(vec2 uv) {
+    if (u.output_mode.z > 0.5) return gs_bilinear(uv);
     if (u.wheel_blur.x < 0.5) return texture(u_tex, uv);
     vec4 sum = vec4(0.0);
     if (u.wheel_blur.x < 1.5) {
@@ -336,6 +451,18 @@ float fog_amount(float d) {
     return clamp((d - u.fog_params.x) * u.fog_params.y, 0.0, 1.0) * u.fog_params.z;
 }
 
+// The GS's 8-bit colour arithmetic (presentation §M7), which truncates where a GPU rounds: the
+// texel as the GS filters it (the bilinear result truncated to 8 bits), MODULATE
+// (texel x colour) >> 7 clamped to 255, and fog (F C + (256 - F) FOGCOL) >> 8 with the fog
+// coefficient F = 255 (1 - amount) (255: no fog, which still takes C past FOGCOL down a level).
+// Each leaves a whole 8-bit level, which the frame buffer stores as it is.
+vec3 gs_texel(vec3 t) { return floor(t * 255.0 + 0.05) / 255.0; }
+vec3 gs_color(vec3 c) { return min(floor(c * 255.0 + 1e-3), 255.0) / 255.0; }
+vec3 gs_fog(vec3 c, vec3 fog, float amount) {
+    vec3 f = fog * 255.0;
+    return floor(f + (c * 255.0 - f) * ((255.0 / 256.0) * (1.0 - amount)) + 1e-3) / 255.0;
+}
+
 void shade() {
     if (u.params.w > 5.5) {
         o_color = dof_sample();
@@ -378,7 +505,8 @@ void shade() {
         // Vertex colour x the reflection weight, an 8-bit GS colour (<= 255/128); then PS2
         // MODULATE: texture x colour (0x80 = 1.0, already expanded by the decoder).
         vec4 vc = vec4(min(v_color.rgb * env_weight(view, n), vec3(255.0 / 128.0)), v_color.a);
-        vec4 c = texture(u_tex, uv) * vc * u.tint;
+        vec4 t = texture(u_tex, uv);
+        vec4 c = vec4(gs_color(gs_texel(t.rgb) * vc.rgb), t.a * vc.a) * u.tint;
         if (u.params.z > 0.5) c.a = v_color.a * u.tint.a; // additive layer: full weight (Ad = 1)
         o_color = c;
         if (u.grade2.w > 0.5) o_color.a = 1.0;
@@ -388,6 +516,11 @@ void shade() {
         // Car reflection pass (PS2 ALPHA Cs*Ad + Cd): environment colour times the
         // pass colour, weighted through SRC_ALPHA blending by the reflectivity Ad = the
         // base pass's texel alpha (bound texture; white when none) x vertex alpha.
+        float ad = v_color.a * wheel_texture(v_uv).a;
+        // GS TEST.DATE with DATM 0: only where Ad < 0x80 (0x80 = 1.0 here), not on texels at full
+        // reflectivity. (The 0x80 an earlier reflection pass leaves: the decoder drops the
+        // triangles such a pass repeats.)
+        if (u.output_mode.w > 0.5 && ad > 254.0 / 255.0) discard;
         vec3 n = normalize(v_normal);
         if (!gl_FrontFacing) n = -n;
         vec3 view = normalize(v_world - u.camera_pos.xyz);
@@ -414,23 +547,24 @@ void shade() {
             float m = max(length(e + vec3(0.0, 0.0, 1.0)), 1e-4);
             env = texture(u_sphere, vec2(0.5 + 0.5 * e.x / m, 0.5 - 0.5 * e.y / m)).rgb;
         }
-        vec3 rgb = env * min(v_color.rgb * w, vec3(255.0 / 128.0)) * u.params.z;
+        vec3 rgb = gs_color(gs_texel(env) * min(v_color.rgb * w, vec3(255.0 / 128.0)) * u.params.z);
         if (u.fog_color.w > 0.0) {
             float d = length(v_world - u.camera_pos.xyz);
-            rgb *= 1.0 - fog_amount(d);
+            rgb = gs_fog(rgb, vec3(0.0), fog_amount(d));
         }
-        o_color = vec4(rgb, v_color.a * wheel_texture(v_uv).a * u.tint.a);
+        o_color = vec4(rgb, ad * u.tint.a);
         return;
     }
-    vec4 c = wheel_texture(v_uv) * v_color;
+    vec4 t = wheel_texture(v_uv);
+    vec4 c = vec4(gs_texel(t.rgb), t.a) * v_color;
     if (u.params.w > 1.5) {
         // Road sheen: the texel modulated by its VU program's lit colour (model.vert), fogged
         // to black (the node program sets the fog colour to 0 for this pass); added weighted by
         // the frame-buffer alpha (Cs * Ad + Cd) or, without one, by its own alpha.
-        c.rgb = texture(u_tex, v_uv).rgb * v_lit;
+        c.rgb = gs_color(gs_texel(texture(u_tex, v_uv).rgb) * v_lit);
         if (u.fog_color.w > 0.0) {
             float d = length(v_world - u.camera_pos.xyz);
-            c.rgb *= 1.0 - fog_amount(d);
+            c.rgb = gs_fog(c.rgb, vec3(0.0), fog_amount(d));
         }
         o_color = c;
         return;
@@ -461,18 +595,43 @@ void shade() {
             c.rgb = mix(c.rgb, env_color(r), u.params.z);
         }
     }
+    c.rgb = gs_color(c.rgb);
     if (u.fog_color.w > 0.0) {
         float d = length(v_world - u.camera_pos.xyz);
-        float f = fog_amount(d);
-        c.rgb = mix(c.rgb, u.fog_color.rgb, f);
+        c.rgb = gs_fog(c.rgb, u.fog_color.rgb, fog_amount(d));
     }
     o_color = c * u.tint;
     if (u.grade2.w > 0.5) o_color.a = 1.0;
 }
 
+#ifdef SPIN_COPIES
+// One of a modelled rim's turned copies (DrawItem::spin_turn; render::spin_copy_at is this rule on
+// the CPU): each copy draws only its share of the picture's samples, so a pixel resolves to the
+// mean of the copies it holds, and each copy's own depth keeps whatever lies behind its spokes (the
+// brake parts) sharp. A pixel's samples hold one copy each; the cells of a 4 x 4 ordered pattern
+// share out the rest, so a pixel's copies spread over the whole turn. Without sample masks (OpenGL
+// ES 3.0) the copies come one to a pixel (as many as cells).
+const int kSpinCells[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
+
+void spin_copy_samples() {
+    int copy = v_copy;
+    int cells = int(u.wheel_blur.w + 0.5);
+    ivec2 p = ivec2(gl_FragCoord.xy) & 3;
+    if (kSpinCells[p.y * 4 + p.x] * cells / 16 != copy % cells) discard;
+#ifndef NO_SAMPLE_MASK
+    gl_SampleMask[0] = 1 << (copy / cells);
+#endif
+}
+#endif
+
 void main() {
+#ifdef SPIN_COPIES
+    spin_copy_samples();
+#endif
+    if (v_fog_w.y > 0.0) discard;
+    v_color = u.output_mode.y > 0.5 ? v_color_in * gl_FragCoord.w : v_color_in;
     v_lit = v_lit_w * gl_FragCoord.w;
-    v_fog = v_fog_w * gl_FragCoord.w;
+    v_fog = v_fog_w.x * gl_FragCoord.w;
     shade();
     // GT3's reflection map is a PSMCT16 frame buffer: each write keeps c8 >> 3 (read back as
     // c5 << 3).

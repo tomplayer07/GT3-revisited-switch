@@ -1746,3 +1746,60 @@ allocations; 668 reflection faces, no busy skips, 962,784 wheel mesh updates;
 clean exit. Last draw counts 2,779 calls/74,088 triangles are not GPU timings.
 This supports near-60 Hz cadence for this identical-six-Mazda workload;
 different models/tracks and long-run stability remain untested.
+
+
+## 4 November: upstream 0.6.1 merge on experiment-deko3d
+
+Local checkpoint 6ece111 preserves the six-car prototype before merging the
+19 upstream commits through f8d8c7c. No switch-port update or push is part
+of this integration. Retained Switch save replacement/backup recovery,
+texture upload caches, street-glow batching and the 650 m production limit.
+Added primitive bounding spheres and retained CPU geometry to the merged
+GpuModel assembler. The SDL texture wrapping helper now handles native GL
+names; Switch callers use that helper.
+
+Native Deko now understands kDepthOnly and kDestAlphaTest. Transparent,
+reflection and depth-only car packets retain their order within each car
+after the opaque scene/course blend phases. Depth-only packets disable all
+colour writes. Reflection DAT discards fully reflective texels as upstream
+does. Lamp projection uses CameraRig::frustum to follow the new GT3 pixel
+aspect. Existing texture-height padding, zero-init, upload barriers, course
+culling, fog and shared six-car geometry are preserved.
+
+New packet route5-061.gtdk (GTDK v9 unchanged, 26,701,984 bytes) must accompany
+this NRO: upstream changes 16-bit colour expansion to c5 << 3 and fixes
+runtime rim texture selection. Old route5-wheels.gtdk remains for rollback.
+Physics bundle remains 10 files / 14,057,139 bytes.
+
+Scope limits: native Deko still uses its 600 m visibility policy rather than
+the full new GS guard-band encoder. New menu/audio/controller features live
+in the main app, not this separate playable prototype. Gamma remains
+unavailable on Switch until its native encoder has an implementation;
+desktop SDL_GPU render states cannot be enabled there. The GLES shader
+generator handles the refactored vertex entry point and new uniform layout;
+GLES direct draws honour depth-only masks and the reflection DAT uniform.
+
+Validation: host gt3tool build passes; full host suite has 573 passed,
+234 skipped (disc/platform-dependent), zero failures. With the actual ISO,
+car/wheel model loading, model LOD statistics, transformed bounds, car alpha
+and reflections and runtime rim texture tests also pass. Deko export and
+physics/glow/animation/six-car smoke tests pass. Hardware validation of the
+merged build remains pending. See subsequent entry for final build/upload.
+
+Deko shader UAM compilation, engine compilation, SDL link and NRO generation
+pass without warnings on the final incremental build. Experimental NRO
+installed to /switch/gt3r-deko-sdl-probe/gt3r-deko-sdl-probe.nro at
+192.168.1.97:5000, downloaded back and compared byte-identical. New
+route5-061.gtdk likewise uploaded/downloaded/compared. NRO SHA-256:
+e3ca9e75fc0f2c4b87775780699ee5e588cdd4298c19cc56a60156db67f409a0.
+Previous installed NRO saved locally as
+build-switch-deko-sdl/gt3r-before-061.nro. Desktop experimental NRO updated;
+Desktop production gt3r.nro untouched. Hardware comparison pending: same
+Route 5 six-car run without OC, inspect paint/glass/wheels/lamps, then exit
+for log collection. R still toggles fog; right-stick click resets the grid.
+
+The complete Switch GLES app also compiles and generates gt3r.nro on the
+experimental branch; it was not installed or copied to the Desktop. Build
+reports unused desktop-dialog callback, existing snprintf range warnings
+and linker --end-group recovery; no errors. This is compile validation,
+not a hardware test of production GLES after the merge.

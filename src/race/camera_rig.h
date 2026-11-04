@@ -12,6 +12,7 @@
 
 #include <SDL3/SDL_events.h>
 
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -58,8 +59,22 @@ public:
     // the car model's frame (x right, y up, z back; origin at the wheelbase midpoint on the body's
     // lowest point). Defaults are GT3's fallbacks.
     void set_car_points(const render::Vec3& p0, const render::Vec3& p1) { point_[0] = p0, point_[1] = p1; }
-    // L1 held: look back (heading + pi, pitch negated); no mirror while held.
+    // L1 held: look back (heading + pi, pitch negated; ours, the far chase and roof, turned
+    // round too); no mirror while held.
     void set_look_back(bool on) { look_back_ = on; }
+    // Ours: looking around (the race pad's right stick, RX / RY; -1..1, y towards the
+    // player). The stick's direction is where the view turns (right: 90 degrees right, pulled
+    // back: behind, pushed up: ahead), eased there and back to the front when let go. In-car the
+    // view turns about the car's up axis with the eye in place; the chase views go round the car.
+    // Look back takes over while held.
+    void set_look(float x, float y) { look_x_ = x, look_y_ = y; }
+    // The look's turn as of the last update(): radians, + right (past pi on the side it turned to).
+    float look_yaw() const { return look_; }
+    // The onboard view shows the rear-view mirror now: not looking back or turned to the side.
+    bool shows_mirror() const { return onboard() && mirror() && !look_back_ && std::fabs(look_) <= kLookMirror; }
+    static constexpr float kLookStart = 0.2f, kLookFull = 0.5f; // the stick's reach: turn from, full turn at
+    static constexpr float kLookRate = 14.0f;                   // the ease (1/s; 95 % in about 0.2 s)
+    static constexpr float kLookMirror = 0.35f;                 // turned past this (radians): no mirror
     // GT3's pre-race shot (starting camera, cameras/start.cam): while `on`, the camera follows the
     // file's record 0 in the car's frame as t goes 0 -> 1 (eye, target and zoom curves).
     void set_intro(bool on, float t) { intro_ = on, intro_t_ = t; }
@@ -85,7 +100,12 @@ public:
 
     render::Vec3 eye() const { return eye_; }
     render::Mat4 view() const { return view_; }
+    // GT3 shows its 640 x 448 frame at 4:3 (its 16:9 option scales x by 0.75), so a picture
+    // `aspect` wide per unit of height takes a frustum aspect x kPixelAspect wide: the
+    // projection and every overlay placed with it (frustum()).
+    static constexpr float kPixelAspect = (640.0f / 448.0f) / (ReplayDirector::kYScale * 4.0f / 3.0f);
     render::Mat4 projection(float aspect) const;
+    render::Frustum frustum(float aspect) const { return render::Frustum::symmetric(fovy_, aspect * kPixelAspect); }
     float fovy() const { return fovy_; }
     void set_orbit(float yaw, float pitch, float dist) { orbit_yaw_ = yaw, orbit_pitch_ = pitch, orbit_dist_ = dist; }
     // Replay (TV) cameras and the followed car's track distance (set before update()).
@@ -123,7 +143,19 @@ public:
     // player's views and car mounts; ours: the fallback TV cameras' distance to their aim.
     float focus() const { return focus_; }
 
-    float near_plane = 0.1f, far_plane = 6000.0f;
+    static constexpr float kFarPlane = 6000.0f; // ours, where no GT3 far plane is known
+    float near_plane = 0.1f, far_plane = kFarPlane;
+    // GT3's far plane (presentation §G: Env0 +0x20, 610..3010 m; 0 = none): its VU clips and culls
+    // the race view there (render::DrawOptions::far_clip), and drops tyre smoke beyond it.
+    // set_gt3_far also moves far_plane out to the backdrop's (CourseScene::kBackdropScale).
+    float gt3_far = 0;
+    void set_gt3_far(float far, float backdrop_scale) {
+        gt3_far = far;
+        far_plane = far > 0 ? far / backdrop_scale : kFarPlane;
+    }
+    // GT3's near plane at this view's zoom (presentation §G: 0.1 x 0.7002 x the zoom),
+    // where its VU clips at the guard band (render::DrawOptions::guard_near).
+    float gt3_near() const { return 0.1f * 0.7002f * 0.7f * ReplayDirector::kYScale / std::tan(fovy_ * 0.5f); }
 
 private:
     CameraMode mode_ = CameraMode::Bumper; // GT3's default view: in-car (both halves in 2P)
@@ -139,6 +171,8 @@ private:
     double lag_time_ = 0;
     render::Vec3 point_[2] = {{0, -0.8f, 0}, {0, -1.5f, -6.0f}};
     bool look_back_ = false;
+    float look_x_ = 0, look_y_ = 0; // the look's stick (set_look)
+    float look_ = 0;                // its eased turn (radians, + right)
     bool mirror_ = true;
     // In-car vibration (GT3's on-board camera shakers): random kicks scaled by the tyres' slip,
     // through a lag, stepped at 60 Hz; see update().

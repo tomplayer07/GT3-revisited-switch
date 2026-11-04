@@ -1,5 +1,15 @@
 # Passaggio al nuovo modello — GT3 Revisited Switch
 
+**Aggiornamento 4 novembre — merge 0.6.1:** lavoro su `experiment-deko3d`,
+checkpoint locale `6ece111`, integrazione dei 19 commit upstream fino a
+`f8d8c7c`. Il difetto delle facciate è già risolto e il test a sei auto è
+stato confermato dall'utente; le istruzioni diagnostiche del 3 novembre
+qui sotto sono storiche. Ora la demo usa `route5-061.gtdk`, rigenerato per
+i nuovi colori/rim del decoder e i pass depth-only/DAT. R commuta la
+foschia. Consultare l'ultima voce di `docs/dev/DEKO3D.md` per build/upload
+e distinguere sempre i test host dalla conferma hardware.
+
+
 Aggiornamento operativo 4 novembre 2026: branch verificato `experiment-deko3d`, HEAD `42521a4`; il lavoro sperimentale rimane non tracciato. Endpoint Switch ora **192.168.1.97:5000**. Fasce rosse, colonna multicolore e bandiere sono risolte e confermate dall'utente. Conservare padding delle texture statiche alte meno di 16 righe, ZeroFillInit e barriere di upload. I vecchi passaggi diagnostici descritti sotto sono storia, non il problema attuale: consultare la coda di `docs/dev/DEKO3D.md` per lo stato più recente.
 
 Prossimo test: foschia originale Env0 di Route 5 (A=45, b≈0.5, RGB≈0.12/0.12/0.14), shader per vertice con interpolazione lineare in schermo, auto/pista/backdrop; cielo e catture ambiente esclusi. **R commuta la foschia**, non più ID/UV. Build `0.6.0-fog`; upload e verifica devono essere completati e registrati prima di dichiararli effettuati. Altri comandi e artefatti separati restano quelli indicati sotto. Nessun commit/push sperimentale eseguito.

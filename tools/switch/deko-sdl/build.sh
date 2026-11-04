@@ -38,6 +38,6 @@ cmake --build "$probe_root/build-switch" --target gt3r_engine --parallel 6
     "$probe_root/build-switch/_deps/libchdr-build/deps/zstd-1.5.7/libzstd.a" \
     -ldeko3dd -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lnx -lm -Wl,--end-group \
     -o "$probe_out/gt3r-deko-sdl-probe.elf"
-/opt/devkitpro/tools/bin/nacptool --create "GT3 SDL Deko3D Probe" "tomplayer07" "0.6.0-opponents" "$probe_out/probe.nacp"
+/opt/devkitpro/tools/bin/nacptool --create "GT3 SDL Deko3D Probe" "tomplayer07" "0.6.1-merge" "$probe_out/probe.nacp"
 /opt/devkitpro/tools/bin/elf2nro "$probe_out/gt3r-deko-sdl-probe.elf" "$probe_out/gt3r-deko-sdl-probe.nro" \
     --nacp="$probe_out/probe.nacp" --icon="$probe_root/packaging/switch_icon.jpg" --romfsdir="$probe_out/romfs"

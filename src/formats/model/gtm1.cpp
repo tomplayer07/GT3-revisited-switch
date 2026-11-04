@@ -658,6 +658,16 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
         }
         return index < set_size[texset] ? it->second + int(index) : -1;
     };
+    // The runtime slot's texture (Options::runtime_set): its entry of the texture-LOD table in use.
+    auto runtime_texture = [&](u32 texset) -> int {
+        if (opt.runtime_set >= 0 && !g.texset_tables.empty()) {
+            const std::vector<u32>& t =
+                g.texset_tables[std::clamp<size_t>(size_t(std::max(opt.run.texture_lod, 0)), 0, g.texset_tables.size() - 1)];
+            if (size_t(opt.runtime_set) < t.size())
+                if (int i = texture_for(t[size_t(opt.runtime_set)], 0); i >= 0) return i;
+        }
+        return texture_for(texset, 0);
+    };
     auto lowest_alpha = [&](int tex) {
         auto mt = min_alpha.find(tex);
         if (mt == min_alpha.end()) {
@@ -695,8 +705,12 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
     // with that texture and its UVs, so the renderer can weight the reflection per pixel
     // with the texel alpha (holes = 0, no reflection). Other triangles keep a per-vertex
     // weight in the vertex alpha. All are kAdditive | kEnvironmentMap | kUnlit | kNoDepthWrite.
+    // `reflected` holds the triangles earlier reflection passes drew (their corners, sorted):
+    // each leaves the frame alpha at 0x80, so a kDestAlphaTest pass draws none of them again.
+    using Corners = std::array<std::array<float, 3>, 3>;
     auto emit_weighted_reflection = [](scene::Mesh& mesh, const scene::Primitive& prim,
-                                       const std::map<std::array<float, 3>, Written>& written) {
+                                       const std::map<std::array<float, 3>, Written>& written,
+                                       std::set<Corners>& reflected) {
         constexpr u32 kFlags = scene::kAdditive | scene::kEnvironmentMap | scene::kUnlit | scene::kNoDepthWrite;
         std::vector<u32> tris(mesh.indices.begin() + prim.first_index,
                               mesh.indices.begin() + prim.first_index + prim.index_count);
@@ -708,6 +722,10 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
         };
         std::map<int, std::vector<u32>> groups; // texture -> indices
         for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+            Corners c;
+            for (int k = 0; k < 3; ++k) std::copy_n(mesh.vertices[tris[t + size_t(k)]].pos, 3, c[size_t(k)].begin());
+            std::sort(c.begin(), c.end());
+            if (!reflected.insert(c).second && (prim.flags & scene::kDestAlphaTest)) continue;
             const Written* w[3] = {info(tris[t]), info(tris[t + 1]), info(tris[t + 2])};
             bool same = w[0] && w[1] && w[2] && w[0]->texture >= 0 && w[1]->texture == w[0]->texture &&
                         w[2]->texture == w[0]->texture;
@@ -732,7 +750,7 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
             p.first_index = u32(mesh.indices.size());
             p.index_count = u32(idx.size());
             p.texture = tex;
-            p.flags = kFlags | (prim.flags & scene::kVertexColor2x);
+            p.flags = kFlags | (prim.flags & (scene::kVertexColor2x | scene::kDestAlphaTest));
             p.env_rows = prim.env_rows;
             std::copy(std::begin(prim.env_c0), std::end(prim.env_c0), p.env_c0);
             std::copy(std::begin(prim.env_c1), std::end(prim.env_c1), p.env_c1);
@@ -753,6 +771,7 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
         // What earlier passes left in the frame buffer's alpha, by vertex position: the
         // reflectivity that later Cs*Ad+Cd reflection passes are weighted with.
         std::map<std::array<float, 3>, Written> written_alpha;
+        std::set<Corners> reflected; // the triangles reflection passes drew (frame alpha 0x80)
         // Base-pass vertex alpha by position, for the road sheen mask.
         std::map<std::array<float, 3>, u32> base_alpha;
         if (opt.road_sheen)
@@ -794,8 +813,33 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
         };
         for (const Draw& d : draws) {
             if (ranges) ranges->push_back({mesh.vertices.size(), mesh.indices.size(), mesh.primitives.size()});
+            // Cars: FBMSK 0xFFFFFFFF writes only the depth (glass drawn without depth writes leaves
+            // its depth so, after its reflection): scene::kDepthOnly.
+            const bool depth_only = opt.weighted_reflection && d.fb_mask == 0xFFFFFFFFu;
+            if (depth_only && !d.depth_write) continue;
             // Alpha-only frame buffer passes (shadow masks) produce no colour.
-            const bool alpha_only = (d.fb_mask & 0x00FFFFFFu) == 0x00FFFFFFu;
+            const bool alpha_only = (d.fb_mask & 0x00FFFFFFu) == 0x00FFFFFFu && !depth_only;
+            // Cars: an alpha-only pass sets the reflectivity (the frame alpha, texel x vertex alpha)
+            // that the reflection passes after it over the same vertices are weighted with. It is
+            // drawn over the glass, which keeps whatever alpha lay behind it.
+            if (alpha_only && opt.weighted_reflection) {
+                for (const Packet& pk : g.chunks[d.chunk].packets) {
+                    u32 tex = pk.mat & 0x1FF;
+                    DecodedPacket dp = g.decode_packet(pk);
+                    int t = dp.prim.tme && dp.has_uv && tex != 0 && tex != 0x1FF ? texture_for(d.texset, tex - 1) : -1;
+                    for (scene::Vertex v : dp.vertices) {
+                        if (d.has_matrix) place_vertex(d.matrix, v);
+                        Written w;
+                        w.vertex_alpha = v.color >> 24;
+                        w.weight = w.vertex_alpha;
+                        w.texture = t;
+                        w.uv[0] = v.uv[0], w.uv[1] = v.uv[1];
+                        if (t >= 0) w.weight = w.weight * texel_alpha(model.textures[size_t(t)], v.uv[0], v.uv[1]) / 255;
+                        written_alpha[{v.pos[0], v.pos[1], v.pos[2]}] = w;
+                    }
+                }
+                continue;
+            }
             if (alpha_only && !opt.static_env_maps && !opt.frame_alpha) continue;
             if (alpha_only && !opt.frame_alpha) {
                 for (const Packet& pk : g.chunks[d.chunk].packets) {
@@ -910,8 +954,8 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
                     if ((g.chunks[d.chunk].flags >> 8) & 1) sm.scale = 255.0f / 128.0f;
                     sm.specular_local = kind == 4;
                 }
-                // 0x1FF is a runtime texture slot (op 0x29; the game fills it, e.g. the wheel rim image);
-                // the set's first texture is the closest static stand-in.
+                // 0x1FF is a runtime texture slot (op 0x29; the game fills it, e.g. the wheel rim image):
+                // opt.runtime_set's image, else the set's first texture, the closest static stand-in.
                 if (dp.prim.tme && dp.has_uv && tex != 0 && !env) {
                     // A set that is not a Tex1 binds no texture and the GS draws with an earlier draw's.
                     // At courses/EU/L_apricot1's reflection dome GT3's cars then reflect no sky (the UK
@@ -920,7 +964,7 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
                         mesh.indices.resize(prim.first_index);
                         continue;
                     }
-                    prim.texture = texture_for(d.texset, tex == 0x1FF ? 0 : tex - 1);
+                    prim.texture = tex == 0x1FF ? runtime_texture(d.texset) : texture_for(d.texset, tex - 1);
                 }
                 if (opt.course_env_maps && env && (kind == 2 || kind == 3) && dp.prim.tme && tex != 0) {
                     // The packet's own texture; the runtime slot 0x1FF is empty while the course is
@@ -969,7 +1013,7 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
                 // for later reflection passes over the same vertices. Passes with the alpha channel
                 // write-masked (car glass) leave whatever lies behind them, which a per-vertex model
                 // cannot know; their own alpha is used as the estimate unless a real write exists.
-                if (opt.weighted_reflection && !env) {
+                if (opt.weighted_reflection && !env && !depth_only) {
                     bool masked = (d.fb_mask & 0xFF000000u) != 0;
                     for (u32 vi = base; vi < mesh.vertices.size(); ++vi) {
                         const scene::Vertex& v = mesh.vertices[vi];
@@ -989,6 +1033,10 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
                     int cut = cutout_for(prim.texture, d.alpha_test_method, d.alpha_test_ref);
                     if (cut != prim.texture) prim.texture = cut, prim.flags |= scene::kAlphaTest;
                 }
+                // Car decals are drawn with depth writes off (op 0x25), colour only: the body's depth
+                // stays under them, so the reflection passes after them add over the decal as over
+                // the paint around it (weighted by the body's alpha, which the decal keeps).
+                if (opt.weighted_reflection && !d.depth_write) prim.flags |= scene::kNoDepthWrite;
                 bool gs_tested = false;
                 if (opt.gs_state) {
                     if (!d.depth_write) prim.flags |= scene::kNoDepthWrite;
@@ -1050,9 +1098,12 @@ scene::Model build_model(const Gtm1& g, const Options& opt, const std::string& n
                     else if ((d.fb_mask & 0xFF000000u) == 0xFF000000u)
                         prim.flags |= scene::kKeepAlpha;
                 }
+                if (depth_only) prim.flags = (prim.flags & (scene::kAlphaTest | scene::kDoubleSided)) | scene::kDepthOnly | scene::kUnlit;
                 if (dp.rgb_2x) prim.flags |= scene::kVertexColor2x;
                 if (weighted) {
-                    emit_weighted_reflection(mesh, prim, written_alpha);
+                    // TEST.DATE (op 0x1D): GT3 draws these passes with DATM 0, where the frame alpha < 0x80.
+                    if (d.dest_alpha_test) prim.flags |= scene::kDestAlphaTest;
+                    emit_weighted_reflection(mesh, prim, written_alpha, reflected);
                     continue;
                 }
                 if (prim.index_count) mesh.primitives.push_back(prim);

@@ -22,7 +22,7 @@ Code: `src/race/` (engine side) and `src/app/screen_race*.cpp` (the screen; see
 | `race/time_text.h/.cpp` | The menus' time format (`menu_time_text`) and the game's "none" placeholders in the font's long dash (no time, no speed, no date) |
 | `race/machine_test.h/.cpp` | Machine tests: the test from the event, its timing points and goal (`MachineTest`) |
 | `race/lap_events.h/.cpp` | The event display (the pop-ups' queue and timing), race gaps (`PassingOrder`), time trials' best lap and split times (`BestLapSplits`) |
-| `race/replay.h/.cpp` | Replay format, recorder, player, save/list in `<user data>/replays/` |
+| `race/replay.h/.cpp` | Replay format, recorder, player, save/list in `<save folder>/replays/` |
 | `sim/exact/race_record.h/.cpp` | A race on the exact core as a replay keeps it (`RaceRecord`: setup, every car's frames, the game's changes, the end hash), `RacePlayback`, `race_hash` |
 | `race/exact_demo.h/.cpp` | The disc's demo runs as race records (`demo_record`: the race GT3's replay playback builds from the save) |
 | `sim/exact/sparks.h/.cpp`, `race/sparks.h/.cpp` | The race's sparks: the particles in GT3's arithmetic, stepped by `ExactRace::step` (`Sparks`); their draw (`SparkDraw`; see "Sparks") |
@@ -96,7 +96,7 @@ update(dt):
                  (the wheels turn by the tick's own turn, WheelState::spin_step: their spin angles wrap)
   camera, engine audio and rumble use render_state
 render:
-  View3D::draw(course items + car items) with frustum culling, draw distance, sorted blending, fog
+  View3D::draw(course items + car items) with frustum culling, GT3's far plane, sorted blending, fog
   HUD over it
 ```
 
@@ -150,11 +150,13 @@ braking up to 0.35; a wheel on a curb (`RaceTrack::is_kerb`) pulses 0.63 at 4 Hz
 plus 0.4 Hz per m/s. Either way a car the pad does not drive
 (an AI run-up, after the finish; `VehicleTelemetry::pad_output` clear) sends nothing,
 and its motors stop. Replays and demonstrations send nothing, and the Vibration option
-(`vib1`, the quick menu's OPTIONS) turns it off. Impulse triggers (`set_trigger_rumble`,
-ours): left = ABS-style chatter when a grounded wheel locks under braking, right =
-wheelspin under throttle (`race_rumble`); a DualSense gets the wheelspin on its
-throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspin`,
-`ffb::throttle_trigger_effect`), as SDL's trigger rumble does nothing there.
+(`vib1`, the quick menu's OPTIONS) turns it off. The triggers (ours, `ForceFeedback::apply`
+from `RaceScreen::feedback`): the brake's follows GT3's ABS at work
+(`VehicleTelemetry::abs_level`, from `exact_telemetry`: the slip over the tyre's best
+braking slip times G g, the share of pressure the ABS takes off), the throttle's the
+wheelspin (`RumbleModel::wheelspin`); Xbox impulse triggers as levels, a DualSense's as
+adaptive-trigger vibrations (`ffb::brake_trigger_effect`, `throttle_trigger_effect`), as
+SDL's trigger rumble does nothing there.
 
 ## Rendering
 
@@ -191,9 +193,10 @@ throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspi
   S in model.frag's `wheel_texture`) and its rim (16 taps turned about the image centre, from
   the mip level of a 64-texel square, alpha tested at AREF 0x20 on the coverage); the other
   cars' rims take the wheel file's spinning image (texture table entry 2, `DrawItem::texture`)
-  above 3 degrees of turn. With showroom wheels, LOD 0's modelled rims take neither: they are
-  drawn sharp up to 3 degrees of turn (`WheelLook::spinning`), and past it the race rims
-  (`race_rims_`, meshes `wheel_<x>_race`) take their place with the blur or spinning image. The
+  above 3 degrees of turn. With showroom wheels, LOD 0's modelled rims take neither: every car's
+  are drawn as copies of themselves turned back over the blur's turn (`WheelLook::turn`,
+  `DrawItem::spin_turn`; [RENDERING](RENDERING.md#large-scenes)), GT3's copies of a flat rim's
+  image done with the rim's geometry, so a rim blurs from standstill on with no change of model. The
   wet road's mirrored cars get none of this (GT3 draws their wheels at the farthest level). The arch shade (`bands_`) turns with the camber, not the steering.
 - Car placement (as GT3 draws it): the car model's origin (wheelbase
   midpoint, y = 0 = the body's lowest point) sits at the physics body height,
@@ -236,7 +239,8 @@ throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspi
 - Cameras (GT3's player views are two camera points of the car's GTCI block, +0x68 count / +0x6C
   offset of 0x40-byte records, translate p at +0x00; fallbacks (0, -0.8, 0) / (0, -1.5, -6)):
   the eye sits at -p in the car model's frame (origin at the body height), looking along that frame's
-  forward axis, 60 degrees horizontal over the 640x448 frame (44 vertical), near 0.1. In-car (point
+  forward axis, 60 degrees horizontal over the 640x448 frame (48 vertical; see "Original resolution and
+  field of view"), near 0.1. In-car (point
   0, R34 1.01 m up, 0.2 m back): the body's attitude, own car not drawn, rear-view mirror. Chase
   (point 1, R34 6 m back, 1.5 m up): heading and pitch lagged by GT3's springs at 60 Hz (yaw 30 e -
   10 w trapezoid, pitch 20 e - 10 w), no roll, no camera lag in position. Change view toggles the
@@ -247,7 +251,13 @@ throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspi
   pitch negated, no mirror) is L1 on the race pad. Ours: change view also offers in-car without
   the mirror and a far chase (bumper -> bumper, no mirror -> chase -> far chase); `[race] views =
   gt3` keeps GT3's two. The last view is remembered for the session only (GT3 keeps it in its
-  options). In-car vibration (GT3's in-car camera shakers, point 0 only, also
+  options). Ours: the look around (`CameraRig::set_look`, the race pad's RX / RY: the right stick,
+  the touch controls' drag on the open screen): the stick's direction turns the view
+  (atan2(x, -y), full from half way out), eased at 14/s and back ahead when let go; near straight
+  back it keeps to the side it is turned to. In-car it turns the view about the car's up axis (eye
+  in place); the chase views turn their heading (round the car, the pitch scaled by its cosine).
+  Look back takes over while held (the far chase now looks back too); no mirror past 0.35 rad; none
+  in the disc's demonstrations, replays or VR stereo. In-car vibration (GT3's in-car camera shakers, point 0 only, also
   while looking back): amplitude A = sum over the wheels of |slip ratio| 0.3 + |slip angle| /
   (pi/2), at most 3; speed factor S = speed clamped to 10..120 km/h over 120 km/h; on about half
   the 60 Hz updates each axis gets a target (r - 0.5) A 250 through v += ((u - u_prev) - 12 v)/60,
@@ -436,6 +446,12 @@ throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspi
   icon row with the scroll, focus pulse, help layer, confirm blink and the menu SE, the race
   behind them where the original has one (see "After a run"); `prerace=1` opens the pre-race
   menu (screenshots).
+- Pointers on these menus (ours: `RaceScreen::menu_pointer`, screen_race_pause.cpp): a finger's
+  tap, a mouse's or the VR controller's hover and click. GT3's (the pause window, REPLAY OPTIONS,
+  the quick menus) take them as the title menus do: a hover focuses the button, cell or icon
+  under it, a tap on the focused one chooses it (as Circle / Cross) and on another focuses it.
+  Our lists (Select's, the OPTIONS / SETTINGS panels) the same way, a tap on the focused row
+  as Cross; a tap on the records panel closes it. The Analyzer takes the pad only.
 - The env map is quantised like GT3's PSMCT16 map (5 bits per channel).
 - Arcade cars run with their table-35 parts (`race/arcade_car.*`); the car page's RACING / DRIFT
   picks the tyre records: stage 10 ("_k") / 11 ("_l"), stage 12 ("_m") on dirt courses, + 13 on the
@@ -445,7 +461,8 @@ throttle trigger as an adaptive-trigger vibration (`ForceFeedbackState::wheelspi
 - Buttons: the race reads each player's race pad (`InputManager::race_pad`), whose buttons are
   GT3's defaults: Cross accelerate, Square brake, Circle handbrake, Triangle
   reverse, R2 / L2 shift, R1 change view, L1 look back (held), Start pause; we put the
-  performance overlay on R3 (Select has no race action: no respawn, as in GT3). The per-player race layout (`[playerN] race = modern
+  performance overlay on R3 (Select has no race action: no respawn, as in GT3). Under `gt3` R3
+  looks back too (`race::look_back_held`; a custom set made from it moves R3's inputs onto L1). The per-player race layout (`[playerN] race = modern
   | gt3`, custom `[playerN.race]`) maps physical inputs onto them; `gt3` is the menu pad itself.
   docs/INPUT.md "Race controls" (the touch overlay presses race pad buttons).
 - Car shadows (nodes 1 and 6, docs/formats/car_model.md): drawn in the
@@ -851,7 +868,7 @@ rebuilds its field from the record wherever it is played (`build_vehicle` while 
   (`GameResult::car_condition`); modes without it run every run with a fresh engine.
 - Saving: every race's Save replay (pause list, the quick menus' SAVE / Save replay of GT mode,
   arcade, licence, quick race, 2P) writes at once (a toast, no slot page) to
-  `<user data>/replays/<course>_<car>_<stamp>.gt3replay` (two saves in one second get the next
+  `<save folder>/replays/<course>_<car>_<stamp>.gt3replay` (two saves in one second get the next
   stamp). That folder is all the theater lists: no slots, no capacity limit.
 - Selection screen: Circle lists saved replays; Cross plays one.
 - During playback: the replay cameras, the original's replay pad (see REPLAY OPTIONS below),
@@ -884,16 +901,28 @@ menus §11.1; `race/post_run.h`, `screen_race_post_run.cpp`; tests `race_post_ru
     no result panel, record overlay or medal; only Start opens its pause (CONTINUE / EXIT / REPLAY
     OPTIONS); music: the replay BGM switch, race songs at 0.7 (the run's music is stopped first).
 - The quick menu's backdrop (`start_menu_backdrop`): time trial, free run and machine test menus,
-  and the GT race / championship pre-race menus, run the race in play mode 2 (a replay: records
-  off; the view mode picked as for the attract demo, `pick_attract_view`; silent): a run alone is
-  its last run from the start, which never ends: once the recording runs out the car gets a
-  cleared input frame (no steering, throttle or brake) and rolls on; before any run its start with
-  no input; a field stands on its grid (not simulated) under the director's cameras. The result
+  and the GT race / championship pre-race menus, run the race in play mode 2 with records off
+  (silent): the race built again live with the race-flow byte 2 and records off
+  (`build_exact_solo` / `build_vehicle`: `ExactFieldOptions::config` 2, `records_off`). The
+  solo conductors make the player's car the AI's (control source 1), a race's every car (control
+  source 2, after its countdown), and records off clear the race's laps and time limit
+  (`ExactRace`), so the computer drives on for as long as the menu stays, before any run, after a
+  run and after DEMONSTRATION; nothing it drives is recorded (`tick` skips the logger, best lap,
+  top speed, machine marks, beeps, the finish), and `end_backdrop_race` puts the run's race back
+  with its recording, replay and result (START skips that rebuild: it builds its own). It is seen
+  from the driver's camera (`live_camera`: the start shot over a standing hold), as the licence
+  preview box is. The result
   menus (arcade race, 2P, GT race, championship) draw no race (their layouts' opaque checker
   background); the licence menu its preview box. Items that keep the menu (save, load ghost)
   start the backdrop again, as the original's driver loop does.
+- DEMONSTRATION (licence, time trial): the demonstration plays once as a replay (`demo_replay()`:
+  Start = the replay pause, the mark only), to the step after its last recorded frame
+  (`demo_over()`, `DemoReplay::run_out`), then the exit transition and the menu it was chosen
+  from, opened again with START focused (`return_to_menu` -> `end_demo`, `open_quick_menu` /
+  `open_prerace_menu`). It stands in the last run's place (`demo_loaded_`): the licence preview
+  box loops it, and REPLAY is disabled until the next run.
 - Licence: a run left with EXIT puts the demonstration in the preview box (the original loads it
-  in the run's place) and disables REPLAY until the next run (below).
+  in the run's place, `demo_loaded_`) and disables REPLAY until the next run (below).
 - Pause EXIT in a free run with a completed lap, and in the top-speed test once the car has moved
   (top speed over 1 m/s) before its goal, is the run's finish (`pause_exit`, `exit_as_finish`):
   the record overlay (5 s; the top-speed test 0.1 s), the end-of-run driver (free run:
@@ -1025,7 +1054,8 @@ workstream (all 80 US courses, 4493 records, no errors):
   request is pending; the cut takes the record at D (u <= 0.6, not the same one), else another
   variant's, else turns on board. A new followed car re-picks the same way as a reset.
 - zoom = 1/tan(half horizontal FOV) over the 640-pixel frame; the 448-line frame gives
-  `fovy = 2 atan(0.7/zoom)` (`ReplayDirector::zoom_fovy`; the player views use the same).
+  `fovy = 2 atan(0.7 x 1.098 / zoom)` with the projection's 1 / 1.098 y scale
+  (`ReplayDirector::zoom_fovy`, `kYScale`; the player views use the same).
   In the telephoto shots (100-150 m, down to 1.4 degrees across) the cars' decals, a few mm
   above the body, stay in front because the depth is reversed like GT3's Z buffer
   (docs/dev/RENDERING.md, coordinate conventions).
@@ -1076,7 +1106,7 @@ theater's demonstrations, the licence preview) follow NTSC-U's on every disc
 
 - **Set-up** (`race/exact_setup.*`): the program data once per CORE.GT3 (`exact_program_data`: GT3's tables, the disc's
   program checked; `race_physics` the one place a disc's physics is chosen: GT3's, `own` false for a program that is not a
-  GT3 release, logged and shown under Settings > Game disc; a program that cannot be read cannot race), the course once per course file (`exact_course`, `sim::exact::RaceCourse`), the
+  GT3 release, logged and shown under Settings > Disc & saves; a program that cannot be read cannot race), the course once per course file (`exact_course`, `sim::exact::RaceCourse`), the
   event record (no event: an empty one, the laps set), the course category, the race mode (single
   player, or the split-screen battle), the start type and countdown from the event (+0x1F3 / +0x1F2;
   battles none), the race's laps, and one race entry per car as GT3's race information holds it: car 0
@@ -1736,8 +1766,10 @@ screen, `screen_race_license.cpp` the flow. The rules (presentation §A):
   multiplier and divider (`base/ee_float.h`); with the float rounding before (an exact chopped
   product, divisions to nearest) 7 did. The licence
   menu's preview box is no movie: GT3 runs the demo live behind the menu and draws the scene into
-  (32, 58, 280, 210); we do the same (looping, TV cameras, silent), and "Demonstration" runs it full
-  screen. Test `exact_demo_records`.
+  (32, 58, 280, 210); we do the same (looping on the step its replay ends, the driver's camera,
+  silent), and
+  "Demonstration" runs it full screen once, as a replay (see "After a run"). Tests
+  `exact_demo_records`, `race_demo_replay_run_out`.
   `GT3R_RACE="tt_event=L0B0003,demo=1"` starts it, `theater=<event>` as the
   Replay Theater does. The arcade time-trial demos (AT01..AT10) start like the
   licences (event speed 100..220 km/h, -100..-399 m on line 6); GT3 drives every
@@ -1828,7 +1860,12 @@ screen, `screen_race_license.cpp` the flow. The rules (presentation §A):
 - Field of view is Hor+: every camera fixes the vertical FOV and the
   horizontal one follows the aspect, so 16:9 shows more at the sides than
   4:3 (`[video] aspect = 4:3` gives GT3's 4:3 view exactly) and nothing
-  is cropped vertically. (GT3's two player views, the pre-race
+  is cropped vertically. GT3's projection scales y by 1 / 1.098 and its
+  640x448 frame is shown at 4:3 (its 16:9 option scales x by 0.75), so a
+  picture A wide per unit of height takes a frustum 0.976 A wide
+  (`CameraRig::kPixelAspect`, in `projection()` and `frustum()`, which the
+  glare, lamp glows, wet road and smoke use too); checked against PCSX2
+  grid captures: the same framing to within 1 %. (GT3's two player views, the pre-race
   shot and the replay cameras use the original's FOVs, see "Cameras"; our
   extra views use our own values.)
 
@@ -1934,7 +1971,9 @@ by the course area):
   lamp streaks (flag 0x20000); then Env0 +0xC2C blur passes (the buffer onto itself, bilinear,
   -0.5 / +0.5 texel; wet 1, dry 6) and the composite over the frame (bilinear, net -0.5 texel)
   with Env0 +0xC20: 0x54 (Cs - Cd) Ad + Cd on the wet courses, 0x58 Cs Ad + Cd on the dry
-  ones. Streaks: per car the headlamps (I 1), brake lamps (k for flag-bit-0 records, else 1 while
+  ones. Both filter as the GS does (docs/formats/course.md "Lighting"): 4-bit weights, each
+  lerp truncated, so a blur copy is ((a + b) >> 1 + (c + d) >> 1) >> 1 and loses about 3 % of
+  the buffer's light (route5_dry's six: 17 %; a GPU's rounding gains instead). Streaks: per car the headlamps (I 1), brake lamps (k for flag-bit-0 records, else 1 while
   the pedal is down) and tail lamps (0.3) at the lamp's mirror image; c = cos(lamp axis, eye ->
   lamp), skipped when negative or behind the eye; a camera-facing quad 0.5 m nearer the eye,
   half width (E74 + (E70 - E74) c) x lamp size (+0x40), from min(E78, lamp height) above the
@@ -1942,7 +1981,8 @@ by the course area):
   x E60..E68 x E6C, added; no attenuation or occlusion (wet route5: width 0.3, cap 1, length 1.8,
   gain 1; route5_dry 0.5 / 1 / 0.5 / 0.3; route11 0.63..0.03 / 0.6 / 0.2 / 0.07). Ours: the
   buffer and blur through `View3D::render_offscreen`, the frame items (alpha clear quad, mask,
-  composite quad with `DrawItem::texture` / `dest_alpha_blend`) just past the near plane,
+  composite quad with `DrawItem::texture` / `dest_alpha_blend`) just past the near plane, the
+  blur copies and the composite filtered by `DrawItem::gs_bilinear` (model.frag `gs_bilinear`),
   `in_order` items inserted right after the scenery (before the cars and their shadows); the frame alpha's GS range above 0x80 (weights up to 2) is clamped
   to 1; the main view only (not 2P halves or the mirror). Slots 9 / 13 were drawn as visible
   scenery before.
@@ -2043,11 +2083,22 @@ filling the options each frame:
 
 ## Known gaps
 
-- The road sheen follows docs/formats/course.md
-  "Lighting"; checked against a lossless PCSX2 capture at Super Speedway (bumper view on
-  the grid, facing the sun): the shape matches, ours adds about 25 % more (+44 vs +34
-  levels), which our own bumper camera (field of view and yaw are not the original's)
-  accounts for at least in part. Its mask is the PS2's: the course scenery draws with the
+- The road sheen follows docs/formats/course.md "Lighting", GT3's clipping at the guard band
+  included (`render::guard_clip`, `DrawItem::guard_band`: the course's triangles that reach past
+  twice the screen or GT3's near plane are drawn from the clipped pieces, the vertex colour
+  linear in screen space), and with the GS's 8-bit arithmetic (docs/dev/RENDERING.md). Checked
+  against lossless PCSX2 captures (arcade grids, in-car view): Super Speedway's road is 1.01 of
+  the original's in every row (1.11 without the clipping, 1.04 with float arithmetic) and falls
+  off towards the bottom of the frame like it. Route 5 (dry) is 2-4 % brighter on the road (was
+  ~10 %; most of it was the arithmetic). Its wet-road pass filters as the GS does
+  (`DrawItem::gs_bilinear`; a PCSX2 software-renderer replay of the grid, every target read back
+  per draw: the original's blur copies reproduced to the pixel, its composite to 99.9 %): the
+  road it reaches is 1.02-1.03 of the original's in both views, like the road it does not reach
+  (1.02-1.04). The pass still adds 1.2 x the original's light: the blend unit rounds the products
+  the GS truncates (the composite's (Cs x Ad) >> 7, about 7 % of the pass, and slot 9's alpha
+  blend; the frame alpha is only in the target, so the shader cannot do it), and the buffer takes
+  the view's MSAA (the GS: one sample per pixel). Wet Route 5 (one blur copy, 0x54): no capture
+  of the original's yet. The sheen's mask is the PS2's: the course scenery draws with the
   frame-buffer alpha (`DrawItem::frame_alpha`: every pass writes its texel x vertex alpha,
   FBMSK 0xFF000000 passes keep it, the alpha-only shadow masks write only it), and the sheen
   adds Cs x Ad (`BlendMode::DestAlphaAdd`). The sheen pass's own alpha (0x7F x texel alpha)
