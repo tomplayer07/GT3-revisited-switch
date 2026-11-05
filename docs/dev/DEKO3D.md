@@ -1954,3 +1954,118 @@ hardware upload is warranted until a concrete native view milestone is ready.
 Final same-source Switch verification passes for both standalone Deko NRO and
 the complete GLES app. Existing linker --end-group recovery remains. Neither
 artifact was uploaded or copied to the Desktop in this frontend-only step.
+
+
+### First concrete Deko adapter for GpuContext/GpuModel/View3D
+
+Implemented a transitional NativeRenderer provider on the probe's verified
+shared device/queue. It owns SDL's renderer and shares GraphicsState ownership;
+main transfers renderer ownership and clears its observer on exception unwinding
+to avoid double destruction. A procedural checker cube uploads through GpuModel,
+and View3D draws it to an explicit native colour/depth target via Model::submit_to.
+The scene does not require another exported packet. Default race rendering
+remains the previous direct path. A overlay now includes the rotating cube at
+(820,245,350,197), labelled GpuContext / GpuModel / View3D, alongside the
+existing native scene preview.
+
+Each frontend view prepares three colour/depth versions and persistent borrowed
+SDL wrappers. Borrowed-image weak reader references and GPU write fences guard
+reuse: only the SDL texture's own lease may remain when writing again. Queued
+commands/in-flight UI frames retain extra lease references; no unsubmitted UI
+reader can be overwritten. Pool creation is transactional on resize. Destruction
+retains source targets through pending UI; write fences protect abandoned draws.
+No steady per-draw target/texture allocation and no CPU readback/copy of the
+rendered view. Model::submit_to binds and barriers an explicit target, clears
+with DrawOptions and uses the supplied engine camera/transform.
+
+Current adapter intentionally supports one basic ordinary static model per view.
+Shared dynamic models, vertex/topology/texture updates, full DrawOptions/material
+parity and frontend reflection/offscreen texture interop return unsupported or
+remain outside this milestone. Device initialization still lives in the probe
+and loads its race scene; the full game is NOT on Deko yet. This proof validates
+real frontend dispatch before separating a scene-independent device startup.
+
+Native SDK build passes without warnings; existing native frontend host test
+passes. NACP 0.6.1-native-view. Previous installed NRO backed up as
+build-switch-deko-sdl/gt3r-before-native-view.nro. Desktop experimental copy
+updated; production copy and packet assets unchanged. Hardware validation
+pending: A overlay cube, toggles, driving then + exit and ftpd log collection.
+
+Native-view NRO uploaded to 192.168.1.97, downloaded back and compared
+byte-identical. SHA-256 eaa0a99a5a8eef9e1df4bcb04cd377edcd309ab1f6cc7e27317e9757355448c7.
+Hardware preview/teardown confirmation remains pending.
+
+
+### A-overlay crash: standalone/engine platform ABI mismatch
+
+User reports crash when enabling the overlay. Retrieved
+/private/tmp/deko-native-view-crash.log: last line is SDL overlay on, no
+frontend target-prepared trace or Deko debug error. Engine flags include
+-D__SWITCH__; the standalone compile did not, and switch.specs does not
+define it. Therefore renderer classes had different layouts across TUs.
+Cross-compiled constant sizeof arrays establish the discrepancy:
+without/with __SWITCH__: GpuContext 344/1048, GpuModel 208/288,
+View3D 1008/1200, TextureInfo 24/56 bytes. Constructing engine objects
+in the standalone allocation could overwrite the heap before A was pressed.
+
+Fixed standalone build flags with explicit -D__SWITCH__ and the SDK portlibs
+include directory (needed for the same GLES headers used by the engine).
+Added render/renderer_abi.*: engine compares its own class sizes and platform/
+GLES/XR feature bits to the caller's TU-local constexpr signature. Probe checks
+this immediately after SDL init, before any graphics class allocation.
+Mismatches now fail with a diagnostic rather than corrupting memory.
+
+Host ABI rejection/native frontend/borrowed-image/geometry tests pass; native
+SDK build passes without warnings. NACP 0.6.1-native-abi. Hardware confirmation
+of A overlay and exit remains pending; no claim that the cube was seen yet.
+
+ABI-corrected NRO uploaded to 192.168.1.97, downloaded back and compared
+byte-identical. Desktop experimental copy updated. Next test: press A and
+inspect rotating cube, then + exit and ftpd.
+
+
+### Persistent A crash: missing SDL driver invalidation callback
+
+New /private/tmp/deko-native-abi-crash.log confirms ABI check succeeds, but
+log still ends at SDL overlay on. Read the matching Atmosphere report
+01793869532_01004ab00a260000.log to /private/tmp/deko-atmosphere-crash.log.
+Instruction abort at PC=0; LR module+0x45e08, caller+0x132a94. Symbolicated
+against the installed ELF before rebuilding: SDL_FlushRenderer, patched
+SDL_render.c:377, called from View3D::draw at view3d.cpp:547. SDL's public
+flush unconditionally calls renderer->InvalidateCachedState; our SDL driver
+had left that callback null. This is a second concrete defect; correcting
+the earlier platform ABI mismatch alone did not fix the crash.
+
+Registered InvalidateCachedState in SDL_render_deko.c. It preserves logical
+viewport/clip; there are no immediate GPU bindings cached in this adapter,
+since queued draws snapshot state and native recording happens later. Added
+an actual SDL_FlushRenderer startup smoke call after renderer creation,
+before frontend model creation. Also added preparation-only target stage
+traces and first native submit trace (no per-frame logging) to pinpoint any
+remaining native view problem.
+
+SDK build passes without warnings; ABI/frontend dispatch host tests pass.
+NACP 0.6.1-native-flush. Saved matching symbol ELF as
+build-switch-deko-sdl/gt3r-native-flush-debug.elf. Hardware A-overlay
+validation still pending; do not report the view as visually confirmed.
+
+Flush-callback build uploaded to 192.168.1.97, downloaded back and compared
+byte-identical. Desktop experimental NRO updated. Await A preview test.
+
+
+### Native frontend hardware confirmation
+
+User confirms the checker cube appears. Retrieved
+/private/tmp/deko-native-view-success.log: ABI check and SDL flush startup
+smoke pass, three 350x197 target versions prepared, 224 frontend draws,
+279 main race frames and clean shutdown. No target-version exhaustion or
+Deko error logged. SDL uploads increase from five to eight (the three view
+versions), live/peak images six; no repeated target allocation is visible
+in this short run. The one large cadence interval (159.318 ms) coincides
+with first A activation / target preparation. Subsequent sampled app loops
+mean 16.525 ms, p99 upper bin 18.25 ms, max 24.613 ms. This ~5-second run
+proves initial view/teardown correctness, not sustained performance or full
+game parity. Native frontend now has a hardware-confirmed single basic
+model view via GpuContext/GpuModel/View3D. Remaining work includes
+scene-independent device startup, multiple models and dynamic resources,
+and full texture/effect interfaces before enabling the actual app.

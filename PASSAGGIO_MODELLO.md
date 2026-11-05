@@ -1,5 +1,32 @@
 # Passaggio al nuovo modello — GT3 Revisited Switch
 
+**Confermato hardware:** dopo fix flag ABI e callback SDL, l'utente vede
+il cubo. Log /private/tmp/deko-native-view-success.log: 224 draw frontend,
+tre target 350x197, 279 frame gara, uscita pulita. Un picco ~159 ms alla
+prima preparazione con A; prova breve, non benchmark. Ora esiste una
+vista base reale attraverso GpuContext/GpuModel/View3D, ancora dentro
+la demo. Prossimo passo: avvio device indipendente dalla scena di prova.
+
+
+**Crash A in verifica:** corretto prima il flag `__SWITCH__` mancante
+nella demo (layout ABI diversi). Il nuovo log conferma ABI corretta ma
+un secondo crash è stato simbolicato: SDL_FlushRenderer chiama
+InvalidateCachedState nullo. Driver corretto e flush provato all'avvio
+nella build `0.6.1-native-flush`; conferma hardware ancora da ricevere.
+ELF corrispondente salvato in build-switch-deko-sdl/gt3r-native-flush-debug.elf.
+Non dichiarare ancora il cubo funzionante su console.
+
+
+**Adapter concreto iniziale:** la demo ora adotta un NativeRenderer Deko
+reale per un cubo procedurale, attraverso GpuContext/GpuModel/View3D.
+A mostra il cubo rotante nel pannello oltre alla miniatura della pista.
+Pool di tre versioni colore/profondità, wrapper persistenti e riuso
+protetto da riferimenti UI e fence. Build `0.6.1-native-view`; vedere
+coda diario per upload e conferma hardware. Rimangono avvio device
+indipendente dalla demo, modelli dinamici, più oggetti e parità effetti.
+Il gioco completo continua a usare GLES.
+
+
 **Nuovo percorso frontend:** `render/native_renderer.h` e
 `GpuContext::adopt_native` permettono a GpuModel/View3D di inoltrare
 modelli e viste a un backend nativo tipizzato. Test con provider software

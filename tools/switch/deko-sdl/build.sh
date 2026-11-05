@@ -24,9 +24,9 @@ done
 # Reuse current engine objects for the actual race camera, without rebuilding the app NRO.
 cmake --build "$probe_root/build-switch" --target gt3r_engine --parallel 6
 /opt/devkitpro/devkitA64/bin/aarch64-none-elf-g++ \
-    -std=c++20 -O2 -g -Wall -Wextra -DGT3R_DEKO_SDL -DGT3R_DEKO_MODEL -DSDL_MAIN_HANDLED \
+    -std=c++20 -O2 -g -Wall -Wextra -D__SWITCH__ -DGT3R_DEKO_SDL -DGT3R_DEKO_MODEL -DSDL_MAIN_HANDLED \
     -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE \
-    -I"$probe_root/src" -isystem /Desktop/switch-portlibs/include -isystem /opt/devkitpro/libnx/include \
+    -I"$probe_root/src" -isystem /Desktop/switch-portlibs/include -isystem /opt/devkitpro/portlibs/switch/include -isystem /opt/devkitpro/libnx/include \
     -L/opt/devkitpro/libnx/lib -L/opt/devkitpro/portlibs/switch/lib \
     -specs=/opt/devkitpro/libnx/switch.specs \
     "$probe_root/tools/switch/deko-sdl/main.cpp" "$probe_root/tools/switch/deko-probe/graphics.cpp" \
@@ -38,6 +38,6 @@ cmake --build "$probe_root/build-switch" --target gt3r_engine --parallel 6
     "$probe_root/build-switch/_deps/libchdr-build/deps/zstd-1.5.7/libzstd.a" \
     -ldeko3dd -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lnx -lm -Wl,--end-group \
     -o "$probe_out/gt3r-deko-sdl-probe.elf"
-/opt/devkitpro/tools/bin/nacptool --create "GT3 SDL Deko3D Probe" "tomplayer07" "0.6.1-merge" "$probe_out/probe.nacp"
+/opt/devkitpro/tools/bin/nacptool --create "GT3 SDL Deko3D Probe" "tomplayer07" "0.6.1-native-flush" "$probe_out/probe.nacp"
 /opt/devkitpro/tools/bin/elf2nro "$probe_out/gt3r-deko-sdl-probe.elf" "$probe_out/gt3r-deko-sdl-probe.nro" \
     --nacp="$probe_out/probe.nacp" --icon="$probe_root/packaging/switch_icon.jpg" --romfsdir="$probe_out/romfs"

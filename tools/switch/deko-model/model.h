@@ -58,6 +58,9 @@ public:
     bool set_environment_origin(const render::Vec3& origin);
     void move_camera(float forward, float side, float turn, float tilt, float lift, float seconds);
     void submit(unsigned slot, float angle, unsigned width, unsigned height);
+    // Explicit target for the game frontend adapter; same reversed-depth convention.
+    void submit_to(unsigned slot, unsigned width, unsigned height, const DkImage* color,
+                   const DkImage* depth, const std::array<float,4>& clear);
     SubmissionTiming submission_timing() const;
 private:
     struct Impl;

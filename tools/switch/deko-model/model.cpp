@@ -948,7 +948,8 @@ struct Model::Impl {
         }
     }
     uint32_t samplerOffset{};
-    void submit(unsigned slot, float angle, unsigned width, unsigned height, bool capturing=false, unsigned face=0) {
+    void submit(unsigned slot, float angle, unsigned width, unsigned height, bool capturing=false, unsigned face=0,
+                const DkImage* viewColor=nullptr, const DkImage* viewDepth=nullptr, const float* clear=nullptr) {
         if (slot >= slots) throw "Model frame slot out of range";
         const auto waitBegin=Clock::now();
         if (inFlight[slot] && dkFenceWait(&fences[slot],-1) != DkResult_Success) throw "Model frame fence failed";
@@ -1010,10 +1011,17 @@ struct Model::Impl {
             dkCmdBufBarrier(cmd,DkBarrier_Fragments,DkInvalidateFlags_Image);
             dkCmdBufBindRenderTarget(cmd,&target,&depth);
         }
+        if (!capturing && viewColor) {
+            if (!viewDepth) throw "Native view depth target is missing";
+            DkImageView color,depth;
+            dkImageViewDefaults(&color,viewColor); dkImageViewDefaults(&depth,viewDepth);
+            dkCmdBufBarrier(cmd,DkBarrier_Fragments,DkInvalidateFlags_Image);
+            dkCmdBufBindRenderTarget(cmd,&color,&depth);
+        }
         DkViewport viewport{0,0,float(width),float(height),0,1};
         DkScissor scissor{0,0,width,height};
         dkCmdBufSetViewports(cmd,0,&viewport,1); dkCmdBufSetScissors(cmd,0,&scissor,1);
-        dkCmdBufClearColorFloat(cmd,0,DkColorMask_RGBA,0.07f,0.09f,0.13f,1);
+        dkCmdBufClearColorFloat(cmd,0,DkColorMask_RGBA,clear ? clear[0] : 0.07f,clear ? clear[1] : 0.09f,clear ? clear[2] : 0.13f,clear ? clear[3] : 1);
         dkCmdBufClearDepthStencil(cmd,true,0,0,0);
         DkRasterizerState raster; dkRasterizerStateDefaults(&raster); raster.cullMode = DkFace_None;
         dkCmdBufBindRasterizerState(cmd,&raster);
@@ -1187,6 +1195,7 @@ struct Model::Impl {
                 dkCmdBufDrawIndexed(cmd,DkPrimitive_Triangles,p.count,1,p.first,int32_t(mesh.vertexBase),0);
             }
         }
+        if (viewColor) dkCmdBufBarrier(cmd,DkBarrier_Fragments,DkInvalidateFlags_Image);
         dkQueueSubmitCommands(queue,dkCmdBufFinishList(cmd));
         dkQueueSignalFence(queue,&fences[slot],capturing); inFlight[slot]=true;
         if (capturing) return;
@@ -1249,4 +1258,8 @@ void Model::move_camera(float forward,float side,float turn,float tilt,float lif
     m.eyePosition=m.eyePosition+render::Vec3{std::sin(m.yaw)*forward-std::cos(m.yaw)*side,lift,std::cos(m.yaw)*forward+std::sin(m.yaw)*side}*(dt*20.0f);
 }
 void Model::submit(unsigned s,float a,unsigned w,unsigned h) { impl_->submit(s,a,w,h); }
+void Model::submit_to(unsigned slot,unsigned w,unsigned h,const DkImage* color,const DkImage* depth,const std::array<float,4>& clear) {
+    if (!color || !depth || !w || !h) throw "Invalid native view target";
+    impl_->submit(slot,0,w,h,false,0,color,depth,clear.data());
+}
 }

@@ -42,3 +42,11 @@ a native backend, GpuModel dispatches typed model resources and View3D::draw
 composites a backend-owned picture. Host tests use a synthetic software provider
 to verify this boundary. A concrete Deko NativeRenderer adapter, native texture
 bridge and application startup selection are NOT implemented yet.
+
+A first concrete NativeRenderer adapter now exists in the probe graphics module.
+It implements ordinary static model upload and one basic offscreen model view
+using three fenced target versions and persistent borrowed SDL wrappers. The
+A overlay exercises GpuContext/GpuModel/View3D with a rotating procedural cube.
+Earlier statements that no concrete adapter exists describe the prior step.
+Full-game startup, dynamic models and full DrawOptions/texture parity remain
+unimplemented; the provider still borrows the probe's scene-initialized device.

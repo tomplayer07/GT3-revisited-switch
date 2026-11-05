@@ -162,6 +162,11 @@ static bool RunCommands(SDL_Renderer *r, SDL_RenderCommand *cmd, void *vertices,
     }
     return true;
 }
+// SDL_FlushRenderer calls this unconditionally after draining its command queue.
+// This adapter caches logical viewport/clip only, not native GPU bindings: each
+// queued draw snapshots its state and the backend records native state later.
+// Preserve viewport/clip so a flush does not change subsequent SDL drawing.
+static void InvalidateCachedState(SDL_Renderer *r) { (void)r; }
 static bool Present(SDL_Renderer *r) {
     DekoRenderer *d = r->internal;
     return d->gpu.present(d->gpu.userdata);
@@ -180,6 +185,7 @@ static bool CreateRenderer(SDL_Renderer *r, SDL_Window *window, SDL_PropertiesID
     SDL_GetWindowSizeInPixels(window, &d->viewport.w, &d->viewport.h);
     r->internal = d; r->window = window; r->name = "gt3r-deko";
     r->SupportsBlendMode = SupportsBlend;
+    r->InvalidateCachedState = InvalidateCachedState;
     r->CreateTexture = CreateTexture; r->UpdateTexture = UpdateTexture; r->DestroyTexture = DestroyTexture;
     r->SetRenderTarget = SetTarget; r->LockTexture = LockTexture; r->UnlockTexture = UnlockTexture;
     r->QueueSetViewport = QueueNoOp; r->QueueSetDrawColor = QueueNoOp;

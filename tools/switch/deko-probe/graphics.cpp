@@ -5,12 +5,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <string>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 #include <cmath>
 
 #include "graphics.h"
+#ifdef GT3R_DEKO_SDL
+#include "render/view3d.h"
+#endif
 #include "render/deko/image_array.h"
 #include "render/deko/borrowed_image.h"
 #include "timing.h"
@@ -895,8 +899,157 @@ struct GraphicsState {
         previousPresentTime=end; previousMode=mode; havePresentTime=true;
     }
 };
+#if defined(GT3R_DEKO_SDL) && defined(GT3R_DEKO_MODEL)
+// Transitional adapter: uses the verified uploader while device ownership moves
+// out of the probe. This is deliberately limited to one ordinary static model.
+class FrontendModel final : public render::NativeModel {
+public:
+    std::shared_ptr<GraphicsState> owner;
+    std::unique_ptr<Model> model;
+    std::vector<render::Mat4> transforms;
+    FrontendModel(std::shared_ptr<GraphicsState> state,const scene::Model& source):owner(std::move(state)) {
+        model=std::make_unique<Model>(owner->device,owner->queue,&owner->shaders[6],&owner->shaders[7],&owner->shaders[8]);
+        model->load_scene(source,{});
+        for (const auto& mesh:source.meshes) transforms.push_back(render::Mat4::from(mesh.transform));
+        trace("Native frontend model uploaded through GpuModel");
+    }
+    bool valid() const override { return bool(model); }
+    bool update_vertices(std::span<const scene::Vertex>) override { return SDL_SetError("Frontend adapter: dynamic vertices not implemented"); }
+    bool update_geometry(const std::vector<scene::Mesh>&) override { return SDL_SetError("Frontend adapter: dynamic topology not implemented"); }
+    bool update_textures(std::span<const render::ModelTextureUpdate>) override { return SDL_SetError("Frontend adapter: texture updates not implemented"); }
+};
+struct FrontendImage {
+    unsigned refs=1;
+    std::shared_ptr<GraphicsState::UiImage> image;
+    render::deko::ImageArray depth;
+    std::weak_ptr<render::deko::BorrowedImageLease> readers;
+    DkFence written{};
+    bool inFlight=false;
+    ~FrontendImage() {
+        if (inFlight && dkFenceWait(&written,-1)!=DkResult_Success)
+            std::_Exit(1); // do not free a target whose GPU completion is unknown
+    }
+    void release() { if (!--refs) delete this; }
+};
+struct FrontendVersion {
+    FrontendImage* image=nullptr; // one owner reference, independent of SDL's lease
+    SDL_Texture* wrapper=nullptr;
+    ~FrontendVersion() { SDL_DestroyTexture(wrapper); if(image) image->release(); }
+};
+class FrontendView final : public render::NativeView {
+    std::shared_ptr<GraphicsState> owner;
+    SDL_Renderer* renderer;
+    std::vector<std::unique_ptr<FrontendVersion>> versions;
+    unsigned sequence=0;
+    uint64_t draws=0;
+    int width=0,height=0;
+    bool errorReported=false;
+    SDL_Texture* fail(const char* message) {
+        const std::string copy(message);
+        SDL_SetError("%s",copy.c_str());
+        if(!errorReported) { trace(copy.c_str()); errorReported=true; }
+        return nullptr;
+    }
+    void prepare(int w,int h) {
+        trace("Native frontend target preparation begin");
+        std::vector<std::unique_ptr<FrontendVersion>> prepared;
+        for(unsigned slot=0;slot<3;++slot) {
+            auto version=std::make_unique<FrontendVersion>();
+            version->image=new FrontendImage();
+            auto& target=*version->image;
+            GraphicsState::UiTexture description;
+            description.w=w; description.h=h; description.target=true;
+            description.pixels.resize(size_t(w)*h*4);
+            target.image=owner->upload_ui_texture(description);
+            trace("Native frontend target colour upload queued");
+            target.depth.create(owner->device,unsigned(w),unsigned(h),1,DkImageFormat_Z24X8);
+            trace("Native frontend target depth allocated");
+            GT3R_DekoImage source{GT3R_DEKO_IMAGE_VERSION,owner.get(),&target,w,h,
+                [](void* p) { ++static_cast<FrontendImage*>(p)->refs; },
+                [](void* p) { static_cast<FrontendImage*>(p)->release(); },
+                [](void* p,unsigned,Uint32* descriptor) { *descriptor=static_cast<FrontendImage*>(p)->image->descriptor; return true; }};
+            const auto props=SDL_CreateProperties();
+            SDL_SetNumberProperty(props,SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,SDL_PIXELFORMAT_RGBA32);
+            SDL_SetNumberProperty(props,SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,SDL_TEXTUREACCESS_STATIC);
+            SDL_SetNumberProperty(props,SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,w);
+            SDL_SetNumberProperty(props,SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,h);
+            SDL_SetPointerProperty(props,GT3R_DEKO_BORROW_IMAGE_PROPERTY,&source);
+            version->wrapper=SDL_CreateTextureWithProperties(renderer,props);
+            SDL_DestroyProperties(props);
+            if(!version->wrapper) throw SDL_GetError();
+            SDL_SetTextureScaleMode(version->wrapper,SDL_SCALEMODE_LINEAR);
+            for(const auto& texture:owner->uiTextures)
+                if(texture->borrowedImage && texture->borrowedImage->source.userdata==&target)
+                    target.readers=texture->borrowedImage;
+            if(target.readers.expired()) throw "Native view image lease was not registered";
+            trace("Native frontend target SDL wrapper registered");
+            prepared.push_back(std::move(version));
+        }
+        versions=std::move(prepared); width=w; height=h;
+        char line[160]; std::snprintf(line,sizeof(line),"Native frontend view prepared: size=%dx%d versions=%zu",w,h,versions.size()); trace(line);
+    }
+public:
+    FrontendView(std::shared_ptr<GraphicsState> state,SDL_Renderer* r):owner(std::move(state)),renderer(r) {}
+    ~FrontendView() override {
+        char line[128]; std::snprintf(line,sizeof(line),"Native frontend view released: draws=%llu versions=%zu",(unsigned long long)draws,versions.size()); trace(line);
+    }
+    SDL_Texture* draw(int w,int h,const render::Mat4& view,const render::Mat4& projection,
+        const render::Vec3& eye,const std::vector<render::DrawItem>& items,const render::DrawOptions& options) override {
+        try {
+            if(w<=0 || h<=0 || w>4096 || h>4096 || items.size()!=1 || !items[0].model ||
+                options.wire!=render::WireMode::Off || options.fog || options.gt3_lighting ||
+                options.env_cube || options.env_sphere || options.mirrored || options.overlay || options.vignette)
+                return fail("Frontend adapter: only a single basic model view is supported");
+            auto* model=dynamic_cast<FrontendModel*>(items[0].model->native_model());
+            if(!model || model->owner.get()!=owner.get()) return fail("Native view model belongs to another backend");
+            if(width!=w || height!=h || versions.empty()) prepare(w,h);
+            owner->collect_ui_images();
+            FrontendVersion* available=nullptr;
+            for(auto& version:versions) {
+                // lock adds one reference; the other must be SDL's own texture.
+                // Queued commands and in-flight UI frames keep additional refs.
+                auto readers=version->image->readers.lock();
+                if(readers && readers.use_count()==2 && (!version->image->inFlight ||
+                    dkFenceWait(&version->image->written,0)==DkResult_Success)) { available=version.get(); break; }
+            }
+            if(!available) return fail("Native view versions still in use; no unsafe overwrite performed");
+            auto& target=*available->image;
+            for(size_t mesh=0;mesh<model->transforms.size();++mesh)
+                if(!model->model->set_mesh_transform(mesh,items[0].transform*model->transforms[mesh]))
+                    return fail("Invalid native view model transform");
+            if(!model->model->set_camera(view,projection,eye)) return fail("Invalid native view camera");
+            model->model->submit_to(sequence++%2,unsigned(w),unsigned(h),&target.image->image,target.depth.image(0),
+                {options.clear[0],options.clear[1],options.clear[2],options.clear[3]});
+            dkQueueSignalFence(owner->queue,&target.written,true); target.inFlight=true;
+            if(!draws) trace("Native frontend first model submission queued");
+            ++draws;
+            return available->wrapper;
+        } catch(const char* error) { return fail(error); }
+          catch(const std::exception& error) { return fail(error.what()); }
+    }
+};
+class FrontendRenderer final : public render::NativeRenderer {
+    std::shared_ptr<GraphicsState> owner;
+    SDL_Renderer* renderer;
+public:
+    FrontendRenderer(std::shared_ptr<GraphicsState> state,SDL_Renderer* r):owner(std::move(state)),renderer(r) {}
+    ~FrontendRenderer() override { SDL_DestroyRenderer(renderer); }
+    SDL_Renderer* renderer2d() const override { return renderer; }
+    const char* name() const override { return "Deko3D native frontend (experimental)"; }
+    std::unique_ptr<render::NativeModel> upload_model(const scene::Model& source) override {
+        try { return std::make_unique<FrontendModel>(owner,source); }
+        catch(const char* error) { SDL_SetError("%s",error); return nullptr; }
+        catch(const std::exception& error) { SDL_SetError("%s",error.what()); return nullptr; }
+    }
+    std::unique_ptr<render::NativeModel> share_model_textures(const render::NativeModel&) override {
+        SDL_SetError("Frontend adapter: shared dynamic models not implemented"); return nullptr;
+    }
+    std::unique_ptr<render::NativeView> create_view() override { return std::make_unique<FrontendView>(owner,renderer); }
+};
+#endif
+
 struct Graphics::Impl : GraphicsState {};
-Graphics::Graphics() : impl_(std::make_unique<Impl>()) {}
+Graphics::Graphics() : impl_(std::make_shared<Impl>()) {}
 Graphics::~Graphics() = default;
 void Graphics::init() { impl_->init(); }
 void Graphics::present() { impl_->present(); }
@@ -1071,6 +1224,24 @@ bool Graphics::toggle_materials() {
     return impl_->materialMode;
 #else
     return false;
+#endif
+}
+std::shared_ptr<render::NativeRenderer> Graphics::create_native_renderer(SDL_Window* window) {
+#ifdef GT3R_DEKO_MODEL
+    auto api=impl_->backend();
+    const auto props=SDL_CreateProperties();
+    SDL_SetPointerProperty(props,SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,window);
+    SDL_SetStringProperty(props,SDL_PROP_RENDERER_CREATE_NAME_STRING,"gt3r-deko");
+    SDL_SetPointerProperty(props,GT3R_DEKO_BACKEND_PROPERTY,&api);
+    std::unique_ptr<SDL_Renderer,decltype(&SDL_DestroyRenderer)> renderer(SDL_CreateRendererWithProperties(props),SDL_DestroyRenderer);
+    SDL_DestroyProperties(props);
+    if(!renderer) return {};
+    auto result=std::make_shared<FrontendRenderer>(impl_,renderer.get());
+    renderer.release();
+    return result;
+#else
+    (void)window;
+    SDL_SetError("Native model adapter is not included"); return {};
 #endif
 }
 GT3R_DekoBackend Graphics::sdl_backend() { return impl_->backend(); }

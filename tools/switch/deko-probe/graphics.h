@@ -5,6 +5,7 @@
 #include "../deko-sdl/backend.h"
 #endif
 
+namespace gt3r::render { class NativeRenderer; }
 namespace gt3r::race { class CarLampGlows; class LampGlows; }
 namespace gt3r::deko_probe {
 // Owns all native graphics resources. No libnx/Deko types escape this boundary.
@@ -21,6 +22,7 @@ public:
 #ifdef GT3R_DEKO_SDL
     GT3R_DekoBackend sdl_backend();
     GT3R_DekoImage scene_image();
+    std::shared_ptr<render::NativeRenderer> create_native_renderer(SDL_Window* window);
     bool toggle_materials();
     bool toggle_reflections();
     bool toggle_vertex_demo();
@@ -48,7 +50,7 @@ public:
 #endif
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 bool open_log();
 void trace(const char* stage);
