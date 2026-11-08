@@ -1,11 +1,18 @@
 #include "app/app.h"
+#if GT3R_SWITCH_DEKO_MENUS
+#include "render/deko/backend.h"
+#include "render/renderer_abi.h"
+#endif
 #include "base/hitch.h"
+#include "render/menu_car_load.h"
+#include "menu/flow/gt_mode_hooks.h"
 #include "base/render_profile.h"
 #include "app/screen_registry.h"
 #include "app/updates.h"
 
 #include "base/log.h"
 #include "base/deferred_log.h"
+#include "audio/music_file.h"
 #include "disc/region.h"
 #include "gt3r_version.h"
 #include "formats/png_writer.h"
@@ -57,6 +64,20 @@ void SDLCALL on_dialog(void* user, const char* const* files, int) {
     if (files && files[0]) app->set_dialog_result(files[0]);
 }
 
+#if defined(__SWITCH__)
+bool has_music_files(const std::string& folder) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(folder, fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code entry_ec;
+        if (it->is_regular_file(entry_ec) && !entry_ec &&
+            music_file_type(it->path().filename().string()) != MusicFileType::None) return true;
+    }
+    return false;
+}
+#endif
+
 } // namespace
 
 bool App::init(int argc, char** argv) {
@@ -99,6 +120,13 @@ bool App::init(int argc, char** argv) {
     config_path_ = data_dir_ + "config.ini";
     if (auto cfg = IniDocument::load(config_path_)) config_ = std::move(*cfg);
 #if defined(__SWITCH__)
+    // Accept the common SD-card layout as well as the app-specific folder. Keep an existing
+    // app-specific library first so this remains compatible with users who already use it.
+    const std::string app_music = data_dir_ + "music/";
+    const std::string sd_music = "sdmc:/music/";
+    music_default_dir_ = has_music_files(app_music) || !has_music_files(sd_music) ? app_music : sd_music;
+#endif
+#if defined(__SWITCH__)
     const bool defer_logs = config_.get("video", "switch_defer_logs").value_or("on") != "off";
     log_defer_diagnostics(defer_logs);
     LOG_INFO("Switch periodic diagnostics: %s", defer_logs ? "RAM buffer, flush on race/app exit" : "immediate SD writes");
@@ -126,10 +154,13 @@ bool App::init(int argc, char** argv) {
 #if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_IOS) || defined(__SWITCH__)
     win_flags |= SDL_WINDOW_FULLSCREEN; // immersive: hide system bars
 #endif
-#if defined(__SWITCH__)
+#if defined(__SWITCH__) && !GT3R_SWITCH_DEKO_MENUS
     win_flags |= SDL_WINDOW_OPENGL;
 #endif
-#if !defined(SDL_PLATFORM_ANDROID) && !defined(SDL_PLATFORM_IOS)
+#if GT3R_SWITCH_DEKO_MENUS
+    win_flags=0; // the native swapchain currently presents a fixed 1280x720 surface
+#endif
+#if !defined(SDL_PLATFORM_ANDROID) && !defined(SDL_PLATFORM_IOS) && !GT3R_SWITCH_DEKO_MENUS
     // [video] fullscreen = on | off (desktop; F11 and the Settings screen change it)
     if (to_lower(config_.get("video", "fullscreen").value_or("off")) == "on") win_flags |= SDL_WINDOW_FULLSCREEN;
 #endif
@@ -199,7 +230,19 @@ bool App::init(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--no-vr") gpu_opts.xr = false;
 #endif
+#if GT3R_SWITCH_DEKO_MENUS
+    if (!render::verify_renderer_abi(render::local_renderer_abi())) { LOG_ERROR("%s",SDL_GetError()); return false; }
+    native_renderer_=render::deko::create_renderer(window_);
+    if(!native_renderer_) { LOG_ERROR("Deko3D initialization failed: %s",SDL_GetError()); return false; }
+    if (!native_renderer_->set_anisotropy(gpu_opts.anisotropy))
+        LOG_WARN("Deko3D anisotropic filtering could not be set to %dx", gpu_opts.anisotropy);
+    renderer_=native_renderer_->renderer2d();
+    gpu_ = render::GpuContext::adopt_native(native_renderer_);
+    if (!gpu_) return false;
+    LOG_INFO("Deko3D native renderer: menus, showroom views and races; GLES resource path bypassed");
+#else
     if (use_gpu) gpu_ = render::GpuContext::create(window_, gpu_opts);
+#endif
 #if GT3R_XR
     if (gpu_ && gpu_->xr()) {
         xr_ = xr::Session::create(gpu_->device(), gpu_->renderer2d(), gpu_->xr_request(), xr::Settings::load(config_));
@@ -222,7 +265,7 @@ bool App::init(int argc, char** argv) {
         // then, and each switch stalls presentation for up to half a second (measured: 0 frames
         // over 40 ms per minute composited vs up to 13 direct). GT3R_DIRECT=1 for comparisons.
         if (!SDL_getenv("GT3R_DIRECT")) platform::keep_composited(window_);
-    } else {
+    } else if (!native_renderer_) {
         if (use_gpu) LOG_WARN("3D rendering unavailable; continuing with the 2D renderer only");
         renderer_ = SDL_CreateRenderer(window_, nullptr); // nullptr: platform's native backend
         if (!renderer_) {
@@ -380,6 +423,7 @@ bool App::language_chosen() const {
 // own.
 void App::apply_language() {
     if (!vfs_) return;
+    render::finish_menu_car_loads();
     if (const char* env = std::getenv("GT3R_LANG"); env && *env)
         if (std::optional<Language> l = text::language_from_code(env); l && has_menus(*l)) {
             vfs_->set_language(*l);
@@ -397,12 +441,14 @@ void App::set_language(const std::string& code) {
     config_.set("gt3menu", language_key(), code);
     save_config();
     if (vfs_->language() == *l) return;
+    render::finish_menu_car_loads();
     vfs_->set_language(*l);
     game::close_gt_mode(); // its data follows the language (units, money, names)
 }
 
 void App::rescan_mods() {
     if (!vfs_) return;
+    render::finish_menu_car_loads();
     vfs_->scan_mods(mods_dir(), &config_);
     game::reload_gt_mode_data(); // loaded at the first title menu, with the mods of then
     measure_disc_music();
@@ -412,6 +458,7 @@ void App::set_mod_enabled(const std::string& id, bool enabled) {
     config_.set("mods", id, enabled ? "on" : "off");
     save_config();
     if (!vfs_) return;
+    render::finish_menu_car_loads();
     vfs_->set_mod_enabled(id, enabled);
     game::reload_gt_mode_data();
     measure_disc_music();
@@ -679,6 +726,8 @@ void App::reset_dynamic_scale() {
 }
 
 void App::close_disc() {
+    render::finish_menu_car_loads(); // workers borrow this disc/VFS and native context
+    if (const auto& release=menu::flow::gt_mode_widget_release()) release(*this);
     if (audio_) audio_->stop_music();
     music_.set_disc_songs({}, {}); // its songs' measuring reads this disc
     game::close_gt_mode(); // its data, reader and save library belong to this disc
@@ -1416,7 +1465,8 @@ void App::shutdown() {
 #endif
     gamma_pass_.reset();
     if (gpu_) gpu_.reset(); // destroys the 2D renderer too
-    else if (renderer_) SDL_DestroyRenderer(renderer_);
+    else if (renderer_ && !native_renderer_) SDL_DestroyRenderer(renderer_);
+    native_renderer_.reset();
     renderer_ = nullptr;
     if (window_) SDL_DestroyWindow(window_);
     SDL_Quit();

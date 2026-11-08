@@ -42,7 +42,8 @@ std::unique_ptr<GpuContext> GpuContext::adopt_native(std::shared_ptr<NativeRende
     }
     std::unique_ptr<GpuContext> ctx(new GpuContext());
     ctx->renderer_=backend->renderer2d();
-    ctx->anisotropy_=false;
+    ctx->anisotropy_=backend->anisotropy_supported();
+    ctx->aniso_level_=backend->anisotropy();
     ctx->native_=std::move(backend);
     return ctx;
 }
@@ -466,8 +467,11 @@ void GpuContext::release_samplers() {
 }
 
 void GpuContext::set_anisotropy(int level) {
-    if (native_) return;
     level = level >= 16 ? 16 : level >= 8 ? 8 : level >= 4 ? 4 : level >= 2 ? 2 : 1;
+    if (native_) {
+        if (native_->set_anisotropy(level)) aniso_level_ = level;
+        return;
+    }
     if (level == aniso_level_) return;
     const int before = aniso_level_;
     aniso_level_ = level;

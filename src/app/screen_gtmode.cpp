@@ -17,6 +17,7 @@
 #include "race/backend.h"
 #include "render/prize_view.h"
 #include "render/showroom.h"
+#include "render/menu_car_load.h"
 #include "sim/car_spec.h"
 #include "render/view3d.h"
 #include "vfs/vfs.h"
@@ -152,6 +153,7 @@ public:
 
 private:
     struct Loaded {
+        int used=0;
         std::unique_ptr<render::GpuModel> model;
         float bmin[3]{}, bmax[3]{};
     };
@@ -207,7 +209,7 @@ private:
         // Phones and tablets: one pass (MSAA still smooths the edges) and so one mirror pass,
         // 3 renders a frame instead of 10. Each pass is its own small 3D render, submit and
         // composite, which a tile-based mobile GPU pays for in full (5 fps on a Galaxy A15).
-        if (platform::is_mobile()) passes = 1;
+        if (platform::is_mobile() || app.gpu()->native_renderer()) passes = 1;
         if (show_.key != entry) {
             show_ = Showroom{};
             show_.key = entry;
@@ -311,6 +313,8 @@ private:
         if (entry.rfind("buycar:", 0) != 0) // car_render_buy draws no floor mirror
         add_mirror(r, page, 0.65f * fade * std::clamp(reflect, 0.0f, 1.0f), [&](int w, int h) {
             render::DrawOptions o = showroom_options(cam, view, true, env, reflect);
+            o.native_env_sphere=native_env_;
+            if(native_env_) o.reflection_strength=std::clamp(reflect,0.0f,1.0f);
             o.clear[0] = o.clear[1] = o.clear[2] = 0;
             o.clear[3] = 1;
             // The game mirrors with (1, -1, 1); we use (-1, -1, 1), a rotation, so the faces
@@ -322,6 +326,8 @@ private:
         });
         composite(r, page, [&](SDL_Texture* tex, int w, int h, float bg) {
             render::DrawOptions o = showroom_options(cam, view, false, env, reflect);
+            o.native_env_sphere=native_env_;
+            if(native_env_) o.reflection_strength=std::clamp(reflect,0.0f,1.0f);
             o.clear[0] = o.clear[1] = o.clear[2] = bg;
             o.clear[3] = 1;
             render::View3D& v = bg > 0.5f ? *view_white_ : *view_black_;
@@ -490,7 +496,7 @@ private:
         static const float kJ4[4][2] = {{0.375f, 0.25f}, {0.125f, 0.75f}, {0.875f, 0.25f}, {0.625f, 0.75f}};
         static const float kJ6[6][2] = {{0.4646f, 0.4646f}, {0.1313f, 0.7979f}, {0.5353f, 0.8686f},
                                         {0.8686f, 0.5353f}, {0.7979f, 0.1313f}, {0.2020f, 0.2020f}};
-        const int passes = trophy ? 4 : 6;
+        const int passes = app.gpu()->native_renderer() ? 1 : trophy ? 4 : 6;
         composite(
             r, area,
             [&](SDL_Texture* tex, int w, int h, float bg) {
@@ -618,9 +624,16 @@ private:
     // The GPU copy of a showroom reflection map (a menu image), uploaded once per distinct
     // image (keyed by size and a sample of its pixels: the pages share two maps).
     SDL_GPUTexture* env_map(App& app, const menu::MenuImage* image) {
+        native_env_.reset();
         if (!image || image->rgba.empty() || image->width < 16 || image->height < 16) return nullptr;
         u64 key = (u64(image->width) << 48) ^ (u64(image->height) << 32);
         for (size_t i = 0; i < image->rgba.size(); i += 997) key = key * 1099511628211ull ^ image->rgba[i];
+        if (auto* native=app.gpu()->native_renderer()) {
+            auto it=native_env_maps_.find(key);
+            if(it==native_env_maps_.end()) it=native_env_maps_.emplace(key,native->upload_texture(image->width,image->height,image->rgba)).first;
+            native_env_=it->second;
+            return nullptr;
+        }
         auto it = env_maps_.find(key);
         if (it != env_maps_.end()) return it->second;
         render::Uploader up(app.gpu()->device());
@@ -634,12 +647,63 @@ private:
     // candidates in one frame and clears beforehand, draw_car_get).
     const Loaded* car(App& app, const std::string& car, int paint, const std::string& wheel, size_t cap = 0) {
         std::string key = car + "#" + std::to_string(paint) + "#" + wheel;
-        if (auto it = cars_.find(key); it != cars_.end()) return it->second.model ? &it->second : nullptr;
+        const bool background=app.gpu()->native_renderer() && app.gpu()->native_renderer()->background_model_upload();
+        if (background) {
+            try {
+                if(auto completed=car_loader_.take_ready()) {
+                    Loaded ready; ready.used=frame_; ready.model=std::move(completed->model);
+                    std::copy(completed->low.begin(),completed->low.end(),ready.bmin);
+                    std::copy(completed->high.begin(),completed->high.end(),ready.bmax);
+                    cars_[pending_car_]=std::move(ready);
+                    LOG_INFO("Native menu car async ready: car=%s read_parse_ms=%.2f upload_ms=%.2f total_ms=%.2f",pending_car_.c_str(),completed->parse_ms,completed->upload_ms,completed->total_ms);
+                    pending_car_.clear();
+                }
+            } catch(const std::exception& error) {
+                LOG_WARN("Native menu car load failed: %s: %s",pending_car_.c_str(),error.what());
+                cars_.try_emplace(pending_car_); pending_car_.clear();
+            }
+        }
+        if (auto it = cars_.find(key); it != cars_.end()) {
+            it->second.used=frame_;
+            return it->second.model ? &it->second : nullptr;
+        }
+        if(background && car_loader_.busy()) return nullptr; // no queued backlog while scrolling
+        if(background) {
+            const auto* session=game::gt_mode_session();
+            if(!session) return nullptr;
+            render::MenuCarRequest request;
+            request.model=session->gt().data().model(car); request.wheel=wheel;
+            request.menu_wheel=true; request.paint=paint;
+            request.wheels=race::car_setup_from_database(session->gt().db(),car).wheels;
+            request.body=body_mod_for_car(session->gt().db(),car,paint);
+            if(auto spec=sim::build_car_spec(session->gt().db(),car)) request.ride_height=spec->axle[0].ride_height;
+            if(cars_.size()>=std::max<size_t>(cap,13u)) {
+                auto oldest=std::min_element(cars_.begin(),cars_.end(),[](const auto& a,const auto& b) { return a.second.used<b.second.used; });
+                cars_.erase(oldest);
+            }
+            pending_car_=key;
+            try {
+                car_loader_.start([reader=app.vfs(),context=app.gpu(),request=std::move(request)] {
+                    return render::load_menu_car(*reader,*context,request);
+                });
+            } catch(const std::exception& error) {
+                LOG_WARN("Native menu loader could not start: %s",error.what());
+                cars_.try_emplace(key); pending_car_.clear();
+            }
+            return nullptr;
+        }
         // Phones keep fewer of the detailed menu cars (Mali drivers spend ~185 KB per texture).
-        if (cars_.size() >= std::max<size_t>(cap, platform::is_mobile() ? 3u : 13u)) cars_.clear();
+        if (cars_.size() >= std::max<size_t>(cap, platform::is_mobile() ? 3u : 13u)) {
+            if (app.gpu()->native_renderer()) {
+                auto oldest=std::min_element(cars_.begin(),cars_.end(),[](const auto& a,const auto& b) { return a.second.used<b.second.used; });
+                cars_.erase(oldest);
+            } else cars_.clear();
+        }
         Loaded& l = cars_[key];
+        l.used=frame_;
         const game::GtModeSession* s = game::gt_mode_session();
         if (!s) return nullptr;
+        const u64 load_started=SDL_GetTicksNS();
         std::string model = s->gt().data().model(car);
         // Menu cars load menu/cars/<model> (e.g. the Miata there is the open roadster;
         // cars/day/ has the hardtop the race uses), the race files as a fallback.
@@ -670,7 +734,12 @@ private:
                     if (mesh.name.rfind("wheel_", 0) != 0) mesh.transform[13] += q;
                 m.bounds_max[1] += q;
             }
+            const u64 geometry_ready=SDL_GetTicksNS();
             l.model = std::make_unique<render::GpuModel>(*app.gpu(), m);
+            if(app.gpu()->native_renderer()) {
+                const u64 uploaded=SDL_GetTicksNS();
+                LOG_INFO("Native menu car ready: model=%s read_parse_ms=%.2f upload_ms=%.2f total_ms=%.2f",model.c_str(),double(geometry_ready-load_started)/1e6,double(uploaded-geometry_ready)/1e6,double(uploaded-load_started)/1e6);
+            }
             std::copy(m.bounds_min, m.bounds_min + 3, l.bmin);
             std::copy(m.bounds_max, m.bounds_max + 3, l.bmax);
         } catch (const std::exception& ex) {
@@ -684,6 +753,7 @@ public:
     // Before a race: the models, views and targets kept between frames (the pages load them
     // again when drawn).
     void release(App& app) {
+        car_loader_.finish(); pending_car_.clear();
         cars_.clear();
         prize_.reset();
         prize_path_.clear();
@@ -700,6 +770,8 @@ public:
             for (auto& [key, t] : env_maps_)
                 if (t) SDL_ReleaseGPUTexture(app.gpu()->device(), t);
         env_maps_.clear();
+        native_env_.reset();
+        native_env_maps_.clear();
         if (light_tex_) SDL_DestroyTexture(light_tex_);
         light_tex_ = nullptr;
         light_image_ = nullptr;
@@ -707,6 +779,8 @@ public:
 
 private:
     std::map<std::string, Loaded> cars_;
+    render::MenuCarLoader car_loader_;
+    std::string pending_car_;
     SDL_Texture* light_tex_ = nullptr;           // the prize car page's floor light (light_texture)
     const menu::MenuImage* light_image_ = nullptr;
     u32 light_w_ = 0, light_h_ = 0;
@@ -729,6 +803,8 @@ private:
     u64 prize_ticks_ = 0;
     std::map<std::pair<int, int>, Targets> targets_;
     std::unique_ptr<render::View3D> view_black_, view_white_;
+    std::shared_ptr<render::NativeTexture> native_env_;
+    std::map<u64,std::shared_ptr<render::NativeTexture>> native_env_maps_;
     std::map<u64, SDL_GPUTexture*> env_maps_; // showroom reflection maps (env_map)
 };
 
@@ -740,6 +816,12 @@ MenuModelRenderer& menu_models() {
 
 const bool gt_mode_hooks_installed = [] {
     game::install_gt_mode_menu();
+#if GT3R_SWITCH_DEKO_MENUS
+    // No automatic race launch while this build exercises only native menus.
+    auto hooks=menu::flow::gt_mode_hooks();
+    hooks.attract_idle_frames=[] { return 0; };
+    menu::flow::set_gt_mode_hooks(std::move(hooks));
+#endif
     menu::flow::set_gt_mode_widget_drawer([](App& app, SDL_Renderer* r, const menu::Element& e, const SDL_FRect& box,
                                              float alpha, const std::string& page, const menu::MenuImage* image) {
         menu_models().draw(app, r, e, box, alpha, page, image);

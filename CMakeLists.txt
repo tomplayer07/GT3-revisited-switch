@@ -232,6 +232,9 @@ add_custom_command(OUTPUT ${GT3R_UI_FONT_SRC}
   VERBATIM)
 target_sources(${GT3R_APP_TARGET} PRIVATE ${GT3R_UI_FONT_SRC})
 target_include_directories(${GT3R_APP_TARGET} SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  include(cmake/SwitchDeko.cmake)
+endif()
 
 if(GT3R_BUILD_TOOLS AND NOT ANDROID AND NOT IOS)
   # The online relay server (also builds on its own: tools/gt3r-relay/CMakeLists.txt).

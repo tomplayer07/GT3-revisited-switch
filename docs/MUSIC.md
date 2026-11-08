@@ -32,6 +32,12 @@ music folder** goes back to it after you chose another one.
 - **The game's own folder**: copy songs into **GT3 Revisited > music** with
   the Files app (**Open music folder** opens it there). No permission is needed.
 
+**Nintendo Switch.** Copy MP3, FLAC or WAV files into `sdmc:/music/` on the
+SD card, or into the app's `music/` folder under `sdmc:/switch/`. If the app
+folder has no supported songs, the game automatically uses `sdmc:/music/`
+when it contains supported songs. An existing library in the app folder keeps
+priority.
+
 **iPhone and iPad.** Either pick a folder with **Music folder** (On My iPhone,
 iCloud Drive or another location in Files), or copy songs into **On My iPhone
 › GT3 Revisited › music** with the Files app, or from a computer in Finder

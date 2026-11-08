@@ -176,7 +176,7 @@ public:
     // folder's music/ (made at the first start, so the Files app shows it on phones). Scanned at
     // start, when the folder changes and when the app comes back to the foreground.
     race::MusicLibrary& music_library() { return music_; }
-    std::string default_music_dir() const { return data_dir_ + "music/"; }
+    std::string default_music_dir() const { return music_default_dir_.empty() ? data_dir_ + "music/" : music_default_dir_; }
     std::string music_folder() const; // [music] folder, or default_music_dir()
     bool music_folder_chosen() const;  // [music] folder is set (not the default)
     void set_music_folder(const std::string& path); // empty: the default; saved, scanned
@@ -233,6 +233,7 @@ private:
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;     // owned by gpu_ when it exists
     std::unique_ptr<render::GpuContext> gpu_;
+    std::shared_ptr<render::NativeRenderer> native_renderer_; // native 2D owner while game 3D is being ported
 #if GT3R_XR
     std::unique_ptr<xr::Session> xr_;
     s64 xr_last_display_ = 0; // previous frame's display time (frame step)
@@ -256,6 +257,7 @@ private:
     std::unique_ptr<Vfs> vfs_;
     IniDocument config_;
     std::string data_dir_;
+    std::string music_default_dir_;
     std::string config_path_;
     MenuInput menu_;
     TouchOverlay touch_;

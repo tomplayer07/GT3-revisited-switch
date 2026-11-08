@@ -212,6 +212,7 @@ void WetRoad::add_buffer_items(std::vector<render::DrawItem>& items, const rende
 
 render::DrawOptions WetRoad::buffer_options(const render::DrawOptions& main) const {
     render::DrawOptions o = main;
+    o.profile_pass=render::ProfilePass::WetRoad;
     for (float& c : o.clear) c = 0;
     o.fixed_width = o.fixed_height = 0;
     o.cull = render::CullMode::None; // pre-mirrored scenery and mirrored cars
@@ -245,6 +246,22 @@ SDL_GPUTexture* WetRoad::render(render::View3D& v, const render::Mat4& view, con
     return t;
 }
 
+std::shared_ptr<render::NativeTexture> WetRoad::render_native(render::View3D& v,const render::Mat4& view,
+    const render::Mat4& proj,const render::Vec3& eye,const std::vector<render::DrawItem>& items,const render::DrawOptions& main) {
+    if(!reflection_ || items.empty()) return {};
+    auto texture=v.render_native_offscreen(0,p_.width,p_.height,view,proj,eye,items,buffer_options(main));
+    if(!texture) return {};
+    render::DrawOptions blur; blur.profile_pass=render::ProfilePass::WetBlur; for(float& c:blur.clear) c=0;
+    for(int k=0;k<p_.blur && blur_quad_[0];++k) {
+        render::DrawItem item; item.model=blur_quad_[k&1].get(); item.lod=0;
+        item.native_texture=texture; item.gs_bilinear=true;
+        auto next=v.render_native_offscreen(1+(k&1),p_.width,p_.height,{},{},{},{item},blur);
+        if(!next) return {};
+        texture=std::move(next);
+    }
+    return texture;
+}
+
 WetRoad::FrameQuads& WetRoad::frame_quads(const render::Frustum& fr) {
     auto same = [&](const render::Frustum& a) {
         return std::fabs(a.left - fr.left) < 1e-5f && std::fabs(a.right - fr.right) < 1e-5f &&
@@ -271,6 +288,24 @@ WetRoad::FrameQuads& WetRoad::frame_quads(const render::Frustum& fr) {
     }
     q->used = ++quad_uses_;
     return *q;
+}
+
+void WetRoad::add_native_frame_items(std::vector<render::DrawItem>& items,const render::Mat4& view,
+    const render::Frustum& fr,std::shared_ptr<render::NativeTexture> buffer) {
+    if(!reflection_ || !buffer || !ctx_) return;
+    FrameQuads& q=frame_quads(fr);
+    if(!q.clear || !q.frame) return;
+    const auto camera=render::inverse(view);
+    if(mask_) {
+        render::DrawItem clear; clear.model=q.clear.get(); clear.transform=camera; clear.lod=0;
+        clear.in_order=clear.frame_alpha=true; items.push_back(clear);
+        render::DrawItem mask; mask.model=mask_.get(); mask.lod=0;
+        mask.in_order=mask.frame_alpha=mask.guard_band=true; items.push_back(mask);
+    }
+    render::DrawItem composite; composite.model=q.frame.get(); composite.transform=camera; composite.lod=0;
+    composite.in_order=true; composite.native_texture=std::move(buffer);
+    composite.gs_bilinear=composite.no_fog=true; composite.dest_alpha_blend=p_.mode==0x54 ? 1 : 2;
+    items.push_back(std::move(composite));
 }
 
 void WetRoad::add_frame_items(std::vector<render::DrawItem>& items, const render::Mat4& view, const render::Frustum& fr,

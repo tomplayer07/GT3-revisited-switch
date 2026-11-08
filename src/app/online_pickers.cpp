@@ -17,6 +17,7 @@
 #include "race/paint.h"
 #include "render/gpu_model.h"
 #include "render/showroom.h"
+#include "render/menu_car_load.h"
 #include "render/view3d.h"
 #include "sim/car_spec.h"
 #include "video/ipu.h"
@@ -434,7 +435,10 @@ struct CarTurntable::State {
     render::ShowroomCamera cam;
     bool cam_tried = false;
     SDL_GPUTexture* env = nullptr;
+    std::shared_ptr<render::NativeTexture> native_env;
     bool env_tried = false;
+    render::MenuCarLoader loader;
+    std::string pending_key, pending_car;
     // The arcade showroom's motion (menus §9.5): yaw spinning up from its start, the
     // distance springing out; `frames` drives the fade-in.
     float yaw = 190, yaw_v = 0, dist = 0.4f, dist_v = 0;
@@ -445,6 +449,7 @@ struct CarTurntable::State {
 CarTurntable::CarTurntable() = default;
 
 CarTurntable::~CarTurntable() {
+    if(s_) s_->loader.finish(); // join before releasing GPU/VFS-dependent state
     if (s_ && s_->env && s_->gpu) SDL_ReleaseGPUTexture(s_->gpu->device(), s_->env);
 }
 
@@ -462,9 +467,13 @@ void CarTurntable::draw(App& app, const SDL_FRect& dst, const data::CarDatabase&
         s.env_tried = true;
         PickerArt::Image img = art.reflection_map(app);
         if (img.rgba && img.width >= 16 && img.height >= 16) {
-            render::Uploader up(app.gpu()->device());
-            s.env = up.texture_rgba(img.width, img.height, img.rgba->data(), true);
-            if (!up.submit()) s.env = nullptr;
+            if (auto* native=app.gpu()->native_renderer()) {
+                s.native_env=native->upload_texture(img.width,img.height,*img.rgba);
+            } else {
+                render::Uploader up(app.gpu()->device());
+                s.env = up.texture_rgba(img.width, img.height, img.rgba->data(), true);
+                if (!up.submit()) s.env = nullptr;
+            }
         }
     }
     std::string key = car.label + "#" + std::to_string(paint) + "#" + car.wheel;
@@ -476,8 +485,46 @@ void CarTurntable::draw(App& app, const SDL_FRect& dst, const data::CarDatabase&
             s.shown.clear();
         }
     }
+    const bool background=app.gpu()->native_renderer() && app.gpu()->native_renderer()->background_model_upload();
+    if(background) {
+        try {
+            if(auto completed=s.loader.take_ready()) {
+                // Obsolete results are retired on the menu thread; never show
+                // the previous selection under the new car's name/paint.
+                if(s.pending_key==s.want) {
+                    const bool new_car=s.pending_car!=s.shown_car;
+                    s.model=std::move(completed->model); s.shown=s.pending_key; s.shown_car=s.pending_car;
+                    std::copy(completed->low.begin(),completed->low.end(),s.bmin);
+                    std::copy(completed->high.begin(),completed->high.end(),s.bmax);
+                    if(new_car) { s.yaw=s.cam.valid ? s.cam.key(0x3E) : 190; s.yaw_v=0; s.dist=0.4f; s.dist_v=0; s.frames=0; s.ticks=SDL_GetTicksNS(); }
+                    LOG_INFO("Native turntable async ready: car=%s total_ms=%.2f",s.pending_key.c_str(),completed->total_ms);
+                }
+                s.pending_key.clear(); s.pending_car.clear();
+            }
+        } catch(const std::exception& error) {
+            LOG_WARN("Native turntable load failed: %s",error.what());
+            if(s.pending_key==s.want) s.shown=s.want;
+            s.pending_key.clear(); s.pending_car.clear();
+        }
+        if(s.shown!=s.want && !s.loader.busy() && ++s.rest>=(s.model ? 3 : 8)) {
+            render::MenuCarRequest request;
+            request.model=car.model; request.wheel=car.wheel; request.paint=paint;
+            request.wheels=race::car_setup_from_database(db,car.label).wheels;
+            request.body=body_mod_for_car(db,car.label,paint);
+            if(auto spec=sim::build_car_spec(db,car.label); spec && spec->axle[0].ride_height>0) request.ride_height=spec->axle[0].ride_height;
+            s.pending_key=s.want; s.pending_car=car.label;
+            try {
+                s.loader.start([reader=app.vfs(),context=app.gpu(),request=std::move(request)] {
+                    return render::load_menu_car(*reader,*context,request);
+                });
+            } catch(const std::exception& error) {
+                LOG_WARN("Native turntable loader could not start: %s",error.what());
+                s.shown=s.want; s.pending_key.clear(); s.pending_car.clear();
+            }
+        }
+    }
     // The model loads once the choice has rested (scrolling through the strip stays quick).
-    if (s.shown != s.want && ++s.rest >= (s.model ? 3 : 8)) {
+    if (!background && s.shown != s.want && ++s.rest >= (s.model ? 3 : 8)) {
         bool new_car = car.label != s.shown_car;
         s.shown = s.want;
         s.shown_car = car.label;
@@ -561,6 +608,8 @@ void CarTurntable::draw(App& app, const SDL_FRect& dst, const data::CarDatabase&
     // winding), faint, drawn first.
     {
         render::DrawOptions o = s.cam.valid ? render::showroom_options(s.cam, view, true, s.env) : render::DrawOptions{};
+    o.native_env_sphere=s.native_env;
+    if(s.native_env) o.reflection_strength=1;
         o.clear[0] = o.clear[1] = o.clear[2] = o.clear[3] = 0;
         o.composite_alpha = 0.3f * fade;
         render::DrawItem it{s.model.get(), render::scale({-1, -1, 1}), 0};
@@ -568,6 +617,8 @@ void CarTurntable::draw(App& app, const SDL_FRect& dst, const data::CarDatabase&
         SDL_FlushRenderer(r);
     }
     render::DrawOptions o = s.cam.valid ? render::showroom_options(s.cam, view, false, s.env) : render::DrawOptions{};
+    o.native_env_sphere=s.native_env;
+    if(s.native_env) o.reflection_strength=1;
     o.clear[0] = o.clear[1] = o.clear[2] = o.clear[3] = 0;
     o.composite_alpha = fade;
     s.view->draw(r, dst, view, proj, eye, {{s.model.get(), {}, 0}}, o);

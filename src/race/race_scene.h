@@ -152,6 +152,8 @@ struct CarLook {
     // Optional early body preparation cull. Shadows and headlamp pools remain
     // independent of this volume; the rear-view mirror uses its usual path.
     const render::ViewFrustum* visibility = nullptr;
+    // Diagnostic isolation: retain the headlamp pool while skipping shadows.
+    bool draw_shadows = true;
 };
 
 class CarVisual {

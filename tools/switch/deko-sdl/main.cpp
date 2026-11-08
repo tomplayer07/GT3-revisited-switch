@@ -14,7 +14,7 @@ using namespace gt3r::deko_probe;
 int main() {
     open_log();
     trace("SDL3 / Deko3D shared-device geometry probe");
-    trace("Test baseline: user reports overclock disabled; clocks not queried");
+    trace("Demo comparison build: read-only clock polling and warmup-excluded CPU/geometry counters");
     if (R_FAILED(romfsInit())) { trace("romfs failed"); close_log(); return 1; }
     int result = 0;
     SDL_Window* window = nullptr;

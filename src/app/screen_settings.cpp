@@ -960,11 +960,16 @@ private:
             action("Use the game's music folder", "Back to the music folder in the game's user data folder.", "",
                    [a] { a->set_music_folder(""); });
         // Phones and tablets open only the game's folder (in the Files app).
+ #if defined(__SWITCH__)
+        action("Music folder location", "Songs go in the SD card's music folder.",
+               "", [this, a] { open_music_folder(*a); });
+ #else
         if (!mobile || !chosen)
             action("Open music folder",
                    mobile ? "Opens it in the Files app (GT3 Revisited > music), to copy songs in."
                           : "Shows it in the file manager, to copy songs in.",
                    "", [this, a] { open_music_folder(*a); });
+ #endif
         // Android: reading audio files not allowed (refused, or turned off in its settings).
         if (access_refused_ || (chosen && !app.music_access()))
             action("Allow music access", "Opens Android's settings for the game: Permissions > Music and audio > Allow.", "",
@@ -1079,9 +1084,15 @@ private:
     }
 
     void open_music_folder(App& app) {
+#if defined(__SWITCH__)
+        (void)app;
+        note_ = "Copy MP3, FLAC or WAV files to sdmc:/music/ on the SD card.";
+        note_left_ = 6;
+#else
         if (platform::open_user_folder(app.music_folder(), app.data_dir())) return;
         note_ = "Could not open " + app.music_folder();
         note_left_ = 4;
+#endif
     }
 
     void choose_music_folder(App& app) {

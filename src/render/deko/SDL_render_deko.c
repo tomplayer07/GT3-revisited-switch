@@ -195,3 +195,14 @@ static bool CreateRenderer(SDL_Renderer *r, SDL_Window *window, SDL_PropertiesID
     return SDL_AddSupportedTextureFormat(r, SDL_PIXELFORMAT_RGBA32);
 }
 SDL_RenderDriver GT3R_Deko_RenderDriver = { CreateRenderer, "gt3r-deko" };
+
+bool GT3R_DekoDescribeBlend(SDL_BlendMode mode, GT3R_DekoBlend* out) {
+    if (!out || mode == SDL_BLENDMODE_INVALID) return false;
+    out->src_color = SDL_GetBlendModeSrcColorFactor(mode);
+    out->dst_color = SDL_GetBlendModeDstColorFactor(mode);
+    out->src_alpha = SDL_GetBlendModeSrcAlphaFactor(mode);
+    out->dst_alpha = SDL_GetBlendModeDstAlphaFactor(mode);
+    out->color_op = SDL_GetBlendModeColorOperation(mode);
+    out->alpha_op = SDL_GetBlendModeAlphaOperation(mode);
+    return true;
+}

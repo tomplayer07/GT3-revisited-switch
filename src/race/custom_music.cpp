@@ -183,6 +183,8 @@ void MusicLibrary::start_scan() {
     thread_ = std::thread([this, folder] {
         ScanInfo info;
         std::vector<CustomSong> songs = scan(folder, info, &stop_);
+        LOG_INFO("Custom music scan: %s, found=%s, songs=%zu, skipped=%zu, broken=%zu",
+                 folder.c_str(), info.found ? "yes" : "no", songs.size(), info.unplayable, info.broken);
         std::lock_guard lock(mutex_);
         result_ = std::move(songs);
         result_info_ = info;
@@ -608,8 +610,11 @@ struct Walk {
     void folder(const fs::path& dir, int depth) {
         if (depth > MusicLibrary::kMaxDepth || stopped()) return;
         std::error_code ec;
-        const fs::path canon = fs::canonical(dir, ec);
-        if (ec || !seen_folders.insert(utf8(canon)).second) return; // unreadable, or reached already
+        fs::path canon = fs::canonical(dir, ec);
+        // Some console filesystems can enumerate an SD path but do not provide canonical paths.
+        // Keep scanning under its normalized spelling; the depth cap still bounds link loops.
+        if (ec) canon = dir.lexically_normal();
+        if (!seen_folders.insert(utf8(canon)).second) return; // reached already
         // In name order, the links after the rest: a file or folder reached both ways is kept
         // under its own name.
         std::vector<std::pair<bool, fs::directory_entry>> entries;
@@ -639,8 +644,13 @@ struct Walk {
                 continue;
             }
             const u64 size = e.file_size(fe);
-            const fs::path real = fs::canonical(p, fe);
-            if (fe || !seen_files.insert(utf8(real)).second) continue; // the same file again (a second link to it)
+            if (fe) continue;
+            std::error_code canonical_ec;
+            fs::path real = fs::canonical(p, canonical_ec);
+            // Directory enumeration can work on Switch SD paths even when canonical() cannot.
+            // A lexical key still deduplicates ordinary entries and lets those songs load.
+            if (canonical_ec) real = p.lexically_normal();
+            if (!seen_files.insert(utf8(real)).second) continue; // the same file again (a second link to it)
             if (out.size() >= limit) { // one song more than the limit
                 info.capped = true;
                 return;

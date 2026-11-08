@@ -14,6 +14,12 @@
 #include <sys/stat.h>
 #include <cstdio>
 #include <unistd.h>
+#if GT3R_SWITCH_DEKO_MENUS
+// NV uses its own transfer heap for driver bookkeeping/mappings, separate
+// from image/vertex storage. libnx's 8 MiB default is too restrictive for
+// complete races with many independent native car parts and render targets.
+extern "C" { u32 __nx_nv_transfermem_size = 32u * 1024 * 1024; }
+#endif
 #endif
 
 using gt3r::App;
@@ -40,7 +46,12 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char** argv) {
 #if defined(__SWITCH__)
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/gt3r", 0777);
+#if GT3R_SWITCH_DEKO_MENUS
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"GT3R_DATA_DIR","sdmc:/switch/gt3r/",true);
     FILE* logf = freopen("sdmc:/switch/gt3r/gt3r.log", "w", stdout);
+#else
+    FILE* logf = freopen("sdmc:/switch/gt3r/gt3r.log", "w", stdout);
+#endif
     if (!logf) {
         freopen("gt3r.log", "w", stdout);
     }
@@ -50,9 +61,15 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char** argv) {
     setvbuf(stderr, NULL, _IONBF, 0);
 
     printf("=== GT3-Revisited starting on Nintendo Switch ===\n");
+#if GT3R_SWITCH_DEKO_MENUS
+    printf("Deko3D NV driver transfer pool: %u MiB\n",__nx_nv_transfermem_size/(1024*1024));
+#endif
     fflush(stdout);
 
     SDL_SetLogOutputFunction(switch_log_callback, nullptr);
+#if GT3R_SWITCH_DEKO_MENUS
+    if (R_FAILED(romfsInit())) { printf("Deko3D ROMFS initialization failed\n"); fflush(stdout); return SDL_APP_FAILURE; }
+#endif
 #endif
 
     if (gt3r::wants_launch_help(argc, argv)) { // before SDL starts: no window
@@ -123,4 +140,7 @@ void SDL_AppQuit(void* state, SDL_AppResult) {
         app->shutdown();
         delete app;
     }
+#if GT3R_SWITCH_DEKO_MENUS
+    romfsExit();
+#endif
 }

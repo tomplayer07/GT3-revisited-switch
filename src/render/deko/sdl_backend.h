@@ -42,3 +42,16 @@ typedef struct GT3R_DekoBackend {
                  SDL_ScaleMode, SDL_TextureAddressMode, SDL_TextureAddressMode);
     bool (*present)(void *);
 } GT3R_DekoBackend;
+
+// Decode via the matching SDL core instead of depending on blend-mode bit layout.
+typedef struct GT3R_DekoBlend {
+    SDL_BlendFactor src_color, dst_color, src_alpha, dst_alpha;
+    SDL_BlendOperation color_op, alpha_op;
+} GT3R_DekoBlend;
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool GT3R_DekoDescribeBlend(SDL_BlendMode mode, GT3R_DekoBlend* out);
+#ifdef __cplusplus
+}
+#endif

@@ -545,12 +545,24 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
         const int height=fixed ? opt.fixed_height : std::max(1,int(std::lround(rect.h*sy*scale)));
         if (!native_) native_=backend->create_view();
         if (!native_ || !SDL_FlushRenderer(renderer)) return;
-        auto* picture=native_->draw(width,height,view,proj,eye,items,opt);
+        auto scene_options=opt;
+        scene_options.overlay=scene_options.vignette=scene_options.haze=nullptr;
+        std::shared_ptr<NativeTexture> processed;
+        SDL_Texture* picture=nullptr;
+        if(opt.post_grade.on) {
+            auto source=native_->render_texture(width,height,view,proj,eye,items,scene_options);
+            if(!native_post_) native_post_=backend->create_view();
+            DrawOptions post; post.profile_pass=ProfilePass::Post; post.post_grade=opt.post_grade;
+            if(source && native_post_) processed=native_post_->process_texture(width,height,source,post);
+            if(processed) picture=processed->renderer_texture();
+        } else picture=native_->draw(width,height,view,proj,eye,items,scene_options);
         if (!picture) { LOG_WARN("Native view draw failed: %s",SDL_GetError()); return; }
         SDL_SetTextureBlendMode(picture,opt.clear[3]<1 || opt.composite_alpha<1 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
         SDL_SetTextureAlphaModFloat(picture,std::clamp(opt.composite_alpha,0.0f,1.0f));
         SDL_RenderTexture(renderer,picture,nullptr,&rect);
         SDL_SetTextureAlphaModFloat(picture,1);
+        if(opt.overlay) submit_2d(renderer,*opt.overlay);
+        if(opt.vignette) submit_2d(renderer,*opt.vignette);
         return;
     }
 #if defined(__SWITCH__)
@@ -2215,6 +2227,46 @@ void View3D::release_offscreen() {
         }
         o.w = o.h = o.samples = 0;
     }
+}
+
+std::shared_ptr<NativeTexture> View3D::render_native_offscreen(int slot,int w,int h,const Mat4& view,const Mat4& proj,
+    const Vec3& eye,const std::vector<DrawItem>& items,const DrawOptions& options) {
+    auto* backend=ctx_.native_renderer();
+    if(!backend || slot<0 || slot>=4 || w<=0 || h<=0 || w>4096 || h>4096) {
+        SDL_SetError("Invalid native offscreen view request"); return {};
+    }
+    auto& target=native_offscreen_[size_t(slot)];
+    if(!target) target=backend->create_view();
+    if(!target || !SDL_FlushRenderer(ctx_.renderer2d())) return {};
+    return target->render_texture(w,h,view,proj,eye,items,options);
+}
+std::shared_ptr<NativeCubeTexture> View3D::render_native_env_cube(const Vec3& pos,const std::vector<DrawItem>& items,
+    const DrawOptions& options,int size,unsigned faces) {
+    auto* backend=ctx_.native_renderer();
+    if(!backend || size<=0 || size>4096 || !std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) {
+        SDL_SetError("Invalid native environment capture request"); return {};
+    }
+    unsigned mask=faces&0x3f;
+    if(!native_cube_ || native_cube_size_!=size) mask=0x3f; // never publish undefined or mixed-size faces
+    if(!mask) return native_cube_;
+    if(!SDL_FlushRenderer(ctx_.renderer2d())) return {};
+    static const Vec3 directions[6]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    static const Vec3 ups[6]={{0,1,0},{0,1,0},{0,0,1},{0,0,-1},{0,1,0},{0,1,0}};
+    auto prepared=native_cube_faces_;
+    auto capture=options; capture.native_env_cube.reset(); capture.native_env_sphere.reset();
+    const auto projection=perspective(1.570796327f,1,0.1f,options.far_clip>1 ? options.far_clip : 2000);
+    for(unsigned face=0;face<6;++face) if(mask&(1u<<face)) {
+        auto& target=native_cube_views_[face];
+        if(!target) target=backend->create_view();
+        if(!target) return {};
+        auto image=target->render_texture(size,size,look_at(pos,pos+directions[face],ups[face]),projection,pos,items,capture);
+        if(!image) return {};
+        prepared[face]=std::move(image);
+    }
+    auto cube=backend->create_cube(prepared);
+    if(!cube) return {};
+    native_cube_faces_=std::move(prepared); native_cube_=std::move(cube); native_cube_size_=size;
+    return native_cube_;
 }
 
 SDL_GPUTexture* View3D::render_offscreen(int slot, int w, int h, const Mat4& view, const Mat4& proj, const Vec3& eye,

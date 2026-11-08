@@ -34,9 +34,62 @@ static bool primitives_compatible(const scene::Primitive& a, const scene::Primit
     return true;
 }
 
+bool same_model_geometry_layout(const std::vector<scene::Mesh>& a,const std::vector<scene::Mesh>& b) {
+    if(a.size()!=b.size()) return false;
+    for(size_t m=0;m<a.size();++m) {
+        const auto& x=a[m]; const auto& y=b[m];
+        if(x.lod!=y.lod || x.vertices.size()!=y.vertices.size() || x.indices!=y.indices || x.primitives.size()!=y.primitives.size()) return false;
+        for(size_t p=0;p<x.primitives.size();++p)
+            if(x.primitives[p].first_index!=y.primitives[p].first_index || x.primitives[p].index_count!=y.primitives[p].index_count ||
+               !primitives_compatible(x.primitives[p],y.primitives[p])) return false;
+    }
+    return true;
+}
+
+size_t describe_model_geometry(const std::vector<scene::Mesh>& meshes,size_t texture_count,
+        std::vector<ModelMeshInfo>& out) {
+    out.resize(meshes.size());
+    size_t vertices=0,indices=0;
+    for(size_t mi=0;mi<meshes.size();++mi) {
+        const auto& m=meshes[mi]; auto& info=out[mi];
+        info.transform=Mat4::from(m.transform); info.lod=m.lod;
+        info.vertex_offset=s32(vertices); info.index_offset=u32(indices);
+        info.primitives.clear(); info.primitive_spheres.clear();
+        info.center={}; info.radius=0;
+        if(!m.vertices.empty()) {
+            float lo[3],hi[3];
+            for(unsigned k=0;k<3;++k) lo[k]=hi[k]=m.vertices[0].pos[k];
+            for(const auto& v:m.vertices) for(unsigned k=0;k<3;++k) {
+                lo[k]=std::min(lo[k],v.pos[k]); hi[k]=std::max(hi[k],v.pos[k]);
+            }
+            info.center={(lo[0]+hi[0])*0.5f,(lo[1]+hi[1])*0.5f,(lo[2]+hi[2])*0.5f};
+            float r2=0;
+            for(const auto& v:m.vertices) {
+                const Vec3 d=Vec3{v.pos[0],v.pos[1],v.pos[2]}-info.center;
+                r2=std::max(r2,dot(d,d));
+            }
+            info.radius=std::sqrt(r2);
+        }
+        for(auto p:m.primitives) {
+            const u32 end=u32(std::min<uint64_t>(uint64_t(p.first_index)+p.index_count,m.indices.size()));
+            const u32 tri_end=p.first_index+(end>p.first_index ? (end-p.first_index)/3*3 : 0);
+            u32 count=0;
+            for(u32 i=p.first_index;i<tri_end;i+=3)
+                if(m.indices[i]<m.vertices.size() && m.indices[i+1]<m.vertices.size() && m.indices[i+2]<m.vertices.size()) count+=3;
+            if(!count) continue;
+            p.first_index=u32(indices)-info.index_offset; p.index_count=count;
+            if(p.texture>=int(texture_count)) p.texture=-1;
+            info.primitives.push_back(p); indices+=count;
+        }
+        info.line_first=u32(indices)-info.index_offset; info.line_count=0;
+        vertices+=m.vertices.size();
+    }
+    return vertices;
+}
+
 // Meshes -> one vertex and one index list, per-mesh draw info; `lines`: wireframe edge lists.
 void assemble_model_geometry(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool lines,
-              std::vector<scene::Vertex>& vertices, std::vector<u32>& indices, std::vector<ModelMeshInfo>& out, bool merge) {
+              std::vector<scene::Vertex>& vertices, std::vector<u32>& indices, std::vector<ModelMeshInfo>& out, bool merge, bool primitive_bounds) {
     for (const scene::Mesh& m : meshes) {
         ModelMeshInfo info;
         info.transform = Mat4::from(m.transform);
@@ -122,6 +175,7 @@ void assemble_model_geometry(const std::vector<scene::Mesh>& meshes, size_t text
             mp.prim.first_index = u32(indices.size()) - info.index_offset;
             indices.insert(indices.end(), mp.indices.begin(), mp.indices.end());
             info.primitives.push_back(mp.prim);
+            if (!primitive_bounds) continue;
             const auto& q=mp.prim;
             const u32* idx=indices.data()+info.index_offset+q.first_index;
             float lo[3],hi[3];

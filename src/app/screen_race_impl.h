@@ -716,7 +716,10 @@ private:
     mutable std::deque<WheelTrack> wheel_tracks_;
     WheelTrack ghost_wheel_track_;
     bool env_cube_on_ = true; // [video] car_reflections
+    unsigned native_env_face_ = 0;
+    unsigned native_env_faces_ = 6; // native quality policy, independent of GLES
     bool shadows_on_ = true;  // [video] car_shadows
+    bool deko_test_no_car_shadows_ = false;
     bool full_car_detail_ = false; // [video] full_car_detail (CarVisual::set_full_detail)
     bool wheel_spin_blur_ = true; // native Switch: opt in with [video] wheel_spin_blur
     bool car_body_cull_ = false; // Switch: skip body preparation outside the current view

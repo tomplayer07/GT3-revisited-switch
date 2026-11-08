@@ -2069,3 +2069,1293 @@ game parity. Native frontend now has a hardware-confirmed single basic
 model view via GpuContext/GpuModel/View3D. Remaining work includes
 scene-independent device startup, multiple models and dynamic resources,
 and full texture/effect interfaces before enabling the actual app.
+
+
+### Scene-independent device startup and standalone frontend harness
+
+Added render/deko/backend.h: create_renderer(window) initializes native device/UI
+services and returns the typed NativeRenderer. Its temporary implementation
+remains in the graphics module, but the client need not own a Graphics wrapper.
+Shared native state survives the local factory wrapper. SDL/ROMFS initialization
+and window lifetime remain the caller's responsibility.
+
+GraphicsState initialization now separates device/presentation from
+load_demo_scene. Native-only startup skips diagnostic scene/depth targets, test
+index buffer, probe/compose shader loading and all race/physics packet IO. It
+creates a default white texture, UI/model shaders and descriptors, then returns
+after queue setup. Native presentation records only SDL commands, without a
+diagnostic render/compose pass. UI recording now binds its own image/sampler
+descriptor tables and full colour-write mask, avoiding inherited scene state.
+Legacy borrowed-scene requests are rejected in native-only mode.
+
+Added tools/switch/deko-sdl/frontend_main.cpp: public factory -> GpuContext ->
+GpuModel -> View3D, procedural checker cube, no external game-data inputs.
+A toggles 640x360 / 400x300 views to exercise target recreation and deferred
+resource lifetime; + exits. Dedicated log /switch/gt3r-deko-frontend.log.
+Build script supports validated race/frontend variants with isolated output
+directories. Both SDK builds pass without warnings; native frontend and ABI
+host tests remain passing. No full-game startup selection yet: this is device
+startup separation, not completion of dynamic/multiple-model/effect support.
+
+New NRO installed separately at /switch/gt3r-deko-frontend/gt3r-deko-frontend.nro
+with title GT3 Deko3D Frontend; Desktop copy gt3r-deko-frontend.nro. Race probe
+and production Switch/Desktop artifacts were not replaced. Matching ELF saved
+as build-switch-deko-frontend/gt3r-deko-frontend-device-debug.elf. Hardware
+confirmation of independent startup, resize and teardown remains pending.
+
+Independent frontend NRO downloaded back from 192.168.1.97 and compared
+byte-identical. Await test of GT3 Deko3D Frontend (cube immediately visible,
+A toggles layout a few times, + exits and ftpd for its dedicated log).
+
+
+### 2026-11-05 — Real app menus on native SDL (hardware test pending)
+
+Independent frontend hardware test passed: 365 frames, five resizes, clean exit.
+Added optional EXCLUDE_FROM_ALL gt3r_deko_app target and tools/switch/build_deko_app.sh,
+using real application menus/input/audio with the native SDL backend. The application
+keeps gpu_ null intentionally: existing guards omit unsupported 3D previews and races.
+Attract demo is disabled for this variant. Separate GT3R_DATA_DIR and config under
+/switch/gt3r-deko-app; existing ISO path retained, explicit save-folder override removed.
+Production GLES NRO/config remain unchanged. Native title GT3 Revisited Deko,
+version 0.6.1-dk-menu; log gt3r.log in its profile directory.
+
+Driver now translates SDL blend factors/operations through SDL private getters,
+supports independent wrap axes, eight sampler variants and 8192 image descriptors.
+Tiny sampled images use padded physical height with logical dimensions retained.
+Native startup skips demo scene assets; line rendering selects SDL geometry.
+
+Native app SDK build and normal GLES SDK build pass. Link map confirms renderer
+objects originate from patched SDL archive. Host suite: 580 passed, 235 skipped.
+Host app packaging remains blocked by existing invalid macOS iconset. Matching
+native ELF: build-switch-deko-app/gt3r-deko-menu-debug.elf. Desktop and separate
+Switch native app NRO updated; actual menu hardware behavior still unverified.
+
+
+### 2026-11-05 — Static showroom cars in the actual application
+
+User confirmed GT Mode and Arcade menus work. Log saved as
+/private/tmp/deko-real-menu-hardware.log: 3804 presents; no native scene submissions
+in that preceding 2D-only build. Cadence measures include pacing and are not a
+GPU benchmark. Failed race requests correctly reported GPU unavailable.
+
+New milestone adopts NativeRenderer through GpuContext inside the app. The
+GT-mode widget renderer and CarTurntable use typed NativeTexture reflection maps
+with isolated caches, keeping the original SDL_GPU upload path for other backends.
+Native uploader copies CPU pixels, records immutable image uploads on the same
+queue and retains image/device ownership. Model slots copy the external sphere
+descriptor after waiting for their fence, and retain its texture until that slot
+is reused. Added eye-space sphere lookup matching the canonical GLSL formula,
+showroom key/fill/ambient lights and environment gradient/strength uniforms.
+
+Menu models use car packet ordering. Native showroom accumulation uses one pass;
+floor mirror and black/white page composition remain enabled. Native views have
+five target versions for two draws per view with two UI frames in flight.
+Races fail before resource setup; animated prize scenes remain omitted because
+multiple items and animation paths are not integrated. No full-renderer parity
+claim: LOD/options, dynamic resources, multi-item scenes and effects still need work.
+Renderer ABI signature now includes DrawOptions size. Added host regression for
+forwarding native sphere and lighting options without an SDL_GPU texture.
+
+Native SDK app build passed; host suite passed (zero failures, 235 skipped).
+Build/version 0.6.1-dk-cars, same separate GT3 Revisited Deko application and log.
+Hardware test of showroom cars remains pending. Production NRO/config untouched.
+
+Final validation: 581 host tests passed, 235 skipped, zero failures. Normal
+GLES SDK app also builds. New NRO copied to Desktop and uploaded to the separate
+Switch app; downloaded back and compared byte-identical. Matching debug ELF:
+build-switch-deko-app/gt3r-deko-showroom-debug.elf.
+
+
+### 2026-11-05 — Showroom freeze: dispatch before CPU fence waits
+
+Hardware test of the new showroom stalled while audio continued. Saved log
+/private/tmp/deko-showroom-freeze.log shows model upload and first view submission,
+then preparation of the second view with no submission message. The third
+showroom pass reuses model slot 0 before PresentImage dispatches the queue.
+
+Official deko3d source Queue::signalFence only emits fence/cache commands; its
+flush argument does not kick off the CPU command queue. Queue::waitIdle explicitly
+calls signalFence, flush, wait in that order. Source inspected from
+https://github.com/devkitPro/deko3d/blob/master/source/dk_queue.cpp .
+
+Added explicit dkQueueFlush before blocking model-slot, UI-slot, image-pool and
+view-target destruction waits. Nonblocking fence polling is unchanged. This
+removes the pending-queue deadlock without adding queue-wide idle waits. Initial
+model-slot reuse is traced to distinguish any remaining GPU issue. Native SDK
+app build passes, version 0.6.1-dk-fence. Hardware confirmation remains pending.
+
+
+Hardware follow-up: user confirms showroom works with 0.6.1-dk-fence. Log
+/private/tmp/deko-showroom-fence-success.log shows repeated car uploads and
+model-slot reuse completing after queue dispatch. One sampled model records
+465 submissions; no FPS claim from these CPU recording/wait counters.
+A remaining target-pool warning (`Native view versions still in use`) is present;
+queued SDL readers can exhaust available versions temporarily. No unsafe overwrite
+was performed, but backpressure needs refinement. Log ends at this warning, so
+clean shutdown is not established by this capture.
+
+Capture counts: 10 models uploaded and 206 target-pool warnings. This is a
+recurring skipped-draw condition, not an isolated warning; prioritize correcting
+SDL/native target backpressure before advancing to race integration.
+
+
+### 2026-11-05 — Bounded UI/native image backpressure
+
+Previous capture had 206 skipped-draw warnings while cycling ten cars. The
+backend queued SDL draws until present: SDL_FlushRenderer handed them over but
+did not submit the backend's own queue. Those queued draws retained native image
+leases, so merely waiting for GPU fences could not release them.
+
+Native-only presentation now acquires one swapchain image lazily and reuses it
+until present, with a separate two-slot ring for UI command memory. When a view
+exhausts its five versions, it submits pending UI draws in order, dispatches the
+queue, collects completed readers and, if needed, waits on submitted UI fences.
+An unconsumed native write is waited only after checking no queued reader owns
+the image. No target pool growth or queue-wide idle was added. Legacy race demo
+presentation retains its original acquisition and composition path.
+
+New SubmissionFrame helper is tested with seven UI batches per visible frame,
+swapchain indices independent of command slots, and recovery after an acquire
+exception. Host suite passes with zero failures and 235 skips. Native SDK app
+compiles, version 0.6.1-dk-pool. New build installed in the separate native app;
+visual/hardware confirmation and warning-count comparison remain pending.
+Matching ELF: build-switch-deko-app/gt3r-deko-pool-debug.elf. Counters summarize
+early UI batches, reader waits and per-view pressure; they are not GPU timings.
+
+
+### 2026-11-05 — Reduce synchronous showroom loading cost (local only)
+
+User reports a hitch when switching cars in the pool build. Saved capture
+/private/tmp/deko-pool-hardware.log contains no pool/draw-failure warning, but
+model uploads take 186–285 ms overall, with the GPU upload wait below 2 ms.
+Most of the measured cost is CPU/resource preparation, not that GPU wait.
+
+Static frontend textures now share one image allocation and one staging allocation
+with per-layout aligned offsets, preserving padded tiny-image texels and their
+existing descriptors/samplers. Checked slice packing rejects overflow. Upload
+staging is destroyed only after the existing upload completion wait; image arena
+remains model-owned until its GPU-safe destructor. The race/demo path continues
+using its original texture allocation policy.
+
+Static frontend frame buffers now use actual primitive count and two scene slots
+(no unused capture slot), with conservative command capacity capped at the prior
+4 MiB. For 300 primitives command/uniform rings total under 1 MiB versus 18 MiB
+previously, excluding textures/geometry and transient upload memory. Existing
+readback diagnostics are skipped for frontend cars. Native menu cache now evicts
+one least-recently-used entry instead of clearing the whole cache at capacity.
+New menu load log separates file/parse time from GpuModel upload time. Loading
+remains synchronous; complete removal of first-load hitches is not established.
+
+Host tests: 586 passed, 235 skipped, zero failures, including new slice alignment,
+overflow and static-vs-race budget tests. Final Deko and normal GLES SDK app builds
+pass. Native version 0.6.1-dk-load. User explicitly requested no transfer because
+the Switch battery is depleted. No Switch upload or Desktop replacement for this
+new build; only local build-switch-deko-app artifacts updated. Hardware comparison
+remains pending. Matching ELF: gt3r-deko-load-debug.elf in that build directory.
+
+
+### 2026-11-05 — Background menu car loading
+
+The allocation optimization reduced backend upload work, but user still observes
+hitches. New capture /private/tmp/deko-load-hardware.log measures 20 synchronous
+menu loads: 180.38–227.86 ms total, average 195.44 ms. Backend preparation/upload
+is approximately 99–117 ms and GPU upload completion wait remains below 2 ms.
+
+Added render/menu_car_load.{h,cpp}: owned request metadata (model/wheel names,
+paint, wheel spec, shared mod-body data, ride height), CPU file read/parse and
+GpuModel creation on an async worker. Backend must explicitly opt in to background
+upload. One outstanding job per picker; menus poll without blocking or queuing
+every transient selection. GT-mode caches completed results by key; turntable
+only publishes a result matching its current selection, retiring obsolete models
+on the menu thread. Preview may remain absent briefly while its model loads.
+
+FrontendRenderer creates a dedicated Deko graphics upload queue on the owner
+thread, before jobs start. Uploaders serialize access to that queue. SceneOptions
+passes the queue to initial model upload, which completes there before the future
+returns. Runtime rendering remains exclusively on the main queue. A never-drawn
+frontend model does not touch the render queue during cleanup, including worker
+construction failures. SDL textures/renderers and UI image collections remain
+owner-thread resources. VFS file reads already serialize file seeks/reads.
+
+Registered loaders join before VFS/disc teardown, language/mod mutations and
+context release; widget/picker release also drains jobs before owned GPU data.
+Worker exceptions are consumed once and permit subsequent requests. New tests
+cover nonblocking polling with a gated worker, bounded pending work, result
+publication, exception recovery, shutdown joins/resource lifetime and mandatory
+backend opt-in. Host suite: 590 passed, 235 skipped, zero failures. Native SDK
+build passes, version 0.6.1-dk-async. Docker had to be reopened before compilation.
+Hardware validation of async behavior remains pending. Matching ELF retained as
+build-switch-deko-app/gt3r-deko-async-debug.elf.
+
+Final validation: normal GLES SDK build also passes. Its initial compile read
+a truncated app.cpp from the Docker mount; the host source was complete and a
+fresh-container recheck passed without source changes. Native NRO copied to
+Desktop and uploaded separately to Switch, downloaded back byte-identical.
+Previous dk-load NRO retained as build-switch-deko-app/gt3r-deko-load-before-async.nro.
+
+
+### 2026-11-05 — Multiple native items and animated prize presentations
+
+User confirms async loading is almost perfect and accepts it. Capture
+/private/tmp/deko-async-hardware-success.log: 2458 presents, native views released
+with 3209/1633 draws, 11 intermediate UI batches and 16 reader-fence waits; no
+draw-failure warnings. CPU cadence is not a GPU FPS measurement.
+
+Native views now prevalidate up to 64 items and compose them in list order into
+one colour/depth target, clearing only for the first model. Model-owned submission
+slot counters avoid the parity collisions caused by per-view counters in two-item
+scenes. A scope guard fences the last successful write even if a later item fails.
+Typed reflection texture leases remain retained per model submission slot.
+Basic item LOD, tint, alpha, light scales, reflection scale and depth reset now
+reach the native renderer; unsupported resources/effects are explicitly rejected.
+This is ordered object composition, not full race global transparent sorting.
+
+Added tested primitive-state mapping for native prize sphere maps, additive and
+MultiplyDest passes; legacy race/car policies remain covered. Native shader mode
+6 samples each PRM primitive's own sphere texture with the canonical reflection
+lookup, rather than using the car environment texture. Prize culling and material
+depth flags are honored, including the bowl-darkening pass. Existing PrizeView
+animates body/camera transforms and composites the license shadow and card through
+the shared depth target. Native menu prize draws use one accumulation pass.
+
+A reusable developer screen `prizes` enumerates actual race/menu PRM files from
+the configured ISO, prioritizing gold/silver/bronze and license cards. Left/right
+select, A pauses, L switches background, + quits, B returns. This permits visual
+validation without races/save changes. PrizeView::load now rejects failed GPU
+models and omits an invalid optional shadow.
+
+Host suite 593 passed, 235 skipped, zero failures; Deko SDK/UAM and normal GLES
+SDK builds pass. Build 0.6.1-dk-prizes uploaded to the separate native app and
+Desktop. A previously absent native-profile args.txt was created with
+`--screen\nprizes\n` to open the gallery for this hardware test. Remove this
+file after the test to restore ordinary startup. Production profile untouched.
+Matching ELF: build-switch-deko-app/gt3r-deko-prizes-debug.elf; prior verified NRO
+backup: gt3r-deko-async-before-prizes.nro in the same build directory. New prize
+rendering/multi-item hardware validation remains pending.
+
+Transfer verification: new NRO and gallery args.txt downloaded back and compared
+byte-identical with local files. Await user test of trophy colours and animated
+license card/shadow; remove the gallery args file when returning to menu work.
+
+
+Hardware confirmation: user reports all prize presentations work, with unfortunate
+appearing white. Capture /private/tmp/deko-prizes-hardware-success.log: 55
+presentation loads, 3798 presents, zero native draw failures, two-item license
+compositions confirmed and no image-pool pressure. menu/unfortunate completed
+91 native draws. Existing format documentation identifies unfortunate/prize PRM0
+files as untextured white-disc placeholders; the white appearance is consistent
+with their content, not evidence of a missing submission. Current src/game
+reward flows have no explicit unfortunate reference; consolation uses its own
+consolation.prm asset. No claim about every original-game fallback path.
+
+Removed only the args.txt created for the gallery test via FTP; listing confirms
+it is absent. Next native app launch returns to normal configured startup.
+Multi-item/prize milestone accepted; continue with dynamic resources/shared model
+textures and the remaining scene/resource bridges needed by real race startup.
+
+
+### 2026-11-05 — Native dynamic model and shared-texture adapters
+
+Implemented concrete NativeModel vertex, geometry and texture updates, and derived
+models via share_model_textures. A family keeps the original Model/images alive;
+derived geometry borrows its immutable GPU images and creates its own descriptor
+table, without uploading/copying static texels. Runtime source texture changes
+are copied into immutable CPU family revisions. Each model synchronizes changed
+revisions into its existing fenced replacement-image slots before drawing. Thus
+static GPU originals are shared, but animated replacements currently duplicate
+per consumer; a family-wide GPU animation cache is a later optimization.
+
+Batch validation precedes mutation. Texture updates own their input copies and
+pad heights below 16 exactly as static uploads do. CPU tests cover atomic failure,
+immutable old revisions, logical dimensions/padding and malformed geometry.
+Stable layout (counts, indices, LOD, primitive/material state) reuses vertex rings
+and updates mesh transforms/bounds. Changed topology builds a replacement Model
+with borrowed originals, then commits. Empty geometry remains valid and submits
+clear-only work when needed; old geometry never leaks into the new view.
+
+The dedicated upload queue/mutex now lives in a shared FrontendUploads object
+created on the owner thread. Derived/root models retain it and the device.
+Topology replacement, empty transitions and wrapper destruction retire submitted
+reads before sphere-image leases can be released: the family can otherwise keep
+an old Model alive beyond its wrapper. This conservative retirement uses queue
+idle on those transitions/destruction, not normal stable-layout/texture updates.
+Frequently changing particle topology still needs capacity-based optimization.
+Legacy race/demo budgets and update paths remain unchanged; dynamic preparation
+now honors the active frame-slot count. Foreign-device texture borrowing rejects.
+
+Added developer screen `dynamic`: direct vertex updates on flag 1, stable-layout
+geometry updates on flag 2, variable/empty geometry on flag 3, shared animated
+32x4 texture padded to height 16, plus an asynchronously loaded Mazda 787B as an
+independent-family colour control. A pauses, L toggles colours, R cycles flag 3
+4 strips/12 strips/empty, + exits, B returns. Native-only malformed vertex and
+texture-batch probes must report rejected=1; GLES skips those probes.
+
+Host tests: 597 passed, 235 skipped, zero failures. Native SDK/UAM and normal GLES
+SDK builds pass. Final native build includes explicit shared-resource retirement.
+Version 0.6.1-dk-dynamic uploaded to separate Switch app and Desktop. Native-profile
+args.txt (previously absent) starts `--screen dynamic`; remove it after hardware
+confirmation to restore normal startup. ELF: gt3r-deko-dynamic-debug.elf; prior
+verified prize NRO: gt3r-deko-prizes-before-dynamic.nro in build-switch-deko-app.
+Hardware validation of the new adapters remains pending.
+
+Final transfer check: NRO and args.txt retrieved from Switch and byte-identical
+to local files. Await the dynamic-animation test and then inspect update/rebuild/
+texture-sync counters and malformed-input rejection markers.
+
+
+### Native offscreen textures and environment capture (2026-11-05)
+
+Dynamic resources passed the hardware test (1501 frames, both malformed-input
+probes rejected). Developer tools now map physical Switch A to confirm and B to
+back without changing game controls.
+
+Added typed render-target snapshots, six-face native environment captures and
+DrawItem native image overrides. First capture and resizing initialize all faces;
+partial captures publish atomically and keep previous snapshots valid. Target
+versions are retained by native consumers as well as SDL readers; model slots
+retain sampled images/cubes until their submission fence permits reuse. Five
+versions bound memory; long-lived inactive consumers can still exhaust that pool.
+Eight external descriptors per model slot cover sphere, six cube faces and image
+override. ABI checks now also cover DrawItem. Legacy SDL_GPU APIs stay unsupported
+on the native backend; app races remain blocked pending full scene integration.
+
+New `--screen reflections` developer screen combines a real Mazda, reflective
+sphere, a secondary camera sampled by an in-world monitor and six SDL face tiles.
+L toggles reflections, R freezes the monitor, A pauses, + exits. Native version
+0.6.1-dk-reflect; hardware validation pending. 600 host tests pass, 235 skipped;
+native SDK/UAM and normal GLES builds pass. Separate experimental app only.
+
+
+### Native scene lights, fog and mirrored views (2026-11-05)
+
+Hardware confirmed the previous reflection/secondary-camera build. Its log records
+1550 main draws, 1364 secondary camera draws and zero target-pool pressure, early
+UI batches or failed draws. These are CPU/submission counters, not GPU benchmarks.
+
+Added per-item ItemLights (owned slot upload, validated 0..4 lights), linear/GT3
+fog, background/no_fog/helper exclusions, background depth policy, mirrored culling,
+opt-in frustum/distance culling and a fragment far-plane limit. RGB5 output and
+GT3 compressed-angle/tilted native cubemap lookup are connected. Legacy prototype
+uniform defaults preserve its tested fog path. The new scene_state.h helper and
+CPU tests cover light replacement/scaling, malformed values, mirrored/background
+culling and fog uniform exclusions/scaling. Whole-car far-plane rejection and
+full race packet/frame-alpha semantics remain pending.
+
+The `reflections` screen now offers five scenes with left/right: base, animated
+red/blue per-car lamps, linear fog, GT3 fog and mirrored view. Its colored backdrop
+is deliberately unfogged and the single-sided monitor tests winding. A pauses,
+L toggles reflections, R freezes the monitor and + exits. Version 0.6.1-dk-scene
+awaits hardware validation. App races remain explicitly blocked.
+
+Final validation: 605 host tests passed, 235 skipped, zero failures. Native SDK/UAM
+and GLES builds passed. Switch/Desktop NRO updated; FTP round-trip byte-identical.
+Matching ELF: gt3r-deko-scene-debug.elf; fallback: gt3r-deko-reflect-before-scene.nro.
+
+
+### First native races launched by the app (2026-11-05, hardware pending)
+
+The scene-state viewer passed all modes 0..4 on hardware (1410 main draws, no
+failed draws or target-pool pressure). The next milestone uses the real app race
+flow rather than another developer screen. RaceScreen now allows the native
+backend; physics, AI, HUD, pause/results/audio/save flow are the existing app's.
+Native wheel spin blur is disabled for this experimental build.
+
+Environment capture and wet-road scene/blur/composite now use typed native
+textures throughout. No SDL_GPU handle casts were added. Native draw scheduling
+separates solid/blended phases, respects joined in-order scenery groups, delays
+late items and clears depth only at the end of a joined group. Global blending
+sorts whole items, not individual meshes. The item cap is 256. Frame-alpha masks,
+keep-alpha and destination-alpha additive/lerp blends are connected. Lamp material
+emission uses the item's brake factor. Native vertex programs now handle course
+environment kinds 2/3 and specular_local road sheen; GS bilinear is available for
+wet-road buffers. A separate native fullscreen pass applies the original grade
+arithmetic to the completed 3D picture.
+
+Remaining parity work: GT3/VU guard-band subdivision and whole-car far-plane
+rejection (GPU clipping currently used), AFAIL RGB_ONLY split passes, replay DOF,
+trail and dissolve, and screen glows/vignette inside the grade (currently composed
+through SDL after it). This is a first integrated playable build, not final parity
+or a measured performance result. The proven standalone race prototype is intact.
+
+610 host tests pass, 235 disc-dependent skips, zero failures. CPU tests cover
+joined scenery ordering, depth-reset timing, late draws, transparent-car sorting,
+frame-alpha masks/composite states and typed fullscreen grade routing. SDK builds
+and Switch transfer must be verified before claiming deployment. Shader inputs
+are staged in the container's local temporary filesystem before UAM compilation;
+direct mounted reads produced unexpected EOF errors while local copies compiled.
+
+Deployment verified: native SDK/UAM and normal GLES builds passed. Final keep-alpha
+blend-cache transition fix compiled successfully. Switch/Desktop NRO updated and
+FTP download byte-identical. Removed only the developer args.txt, confirmed absent
+in the separate native profile. Matching ELF gt3r-deko-race1-debug.elf; verified
+scene fallback gt3r-deko-scene-before-race.nro. Hardware race launch still pending.
+
+
+### First app race freeze investigation — race2 (2026-11-05)
+
+Race1 hardware test froze without closing. Log deko-race1-failed.log reaches a
+completed 32.1 s load, native cube/wet-road buffers and a first 88-item scene
+submission, then stops at the next target preparation. No failed-draw or Deko
+error marker was recorded. Cumulative allocation totals are not live memory:
+initial model upload command buffers have already been released.
+
+New-image creation now explicitly flushes the graphics queue before retiring
+completed UI upload resources or allocating a target. A GPU memory unmap can
+otherwise occur while prior graphics submissions remain buffered until present.
+This is the current synchronization hypothesis, not a hardware-proven root cause.
+No per-frame queue-idle was added. Extra target-preparation/upload checkpoints
+identify dispatch, retirement, CPU buffer and colour allocation boundaries if the
+freeze persists. Native SDK build passes; host/GLES code is unchanged by the fix.
+Version 0.6.1-dk-race2 awaits the same actual-race test, no extra viewer tests.
+
+
+### Initial model upload cost — race3 (2026-11-05, hardware pending)
+
+User reports another freeze but clarifies waiting less than one minute. Race2's
+log stops during opponent car uploads, before `Race: loaded` and the first scene;
+it does not establish a recurrence of race1's later target-preparation stall.
+The next hardware run must allow loading to finish (up to two minutes once).
+The original race1 load alone took 32.1 seconds.
+
+Initial command pools are now sized conservatively by image-copy count: 64 KiB
+base plus 512 bytes per image, aligned to 4 KiB. Borrowed-texture geometry needs
+zero texture-copy slots. Previously every tiny car part allocated/zeroed 4 MiB;
+that pool was already released after upload, so this targets load-time allocation
+and zero-fill overhead, not persistent memory or measured in-race FPS. Legacy
+probe/readback pools retain 4 MiB. Added boundary/alignment/budget CPU tests and
+per-upload budget logging. Native SDK build passes; runtime improvement pending.
+
+Final checks: 611 host tests passed, 235 skipped, zero failures. Native SDK build
+passed; Switch/Desktop NRO updated and FTP readback byte-identical. Hardware
+loading/first-frame result remains pending.
+
+
+### Native app race reader retention and empty passes — race4 (2026-11-05)
+
+First complete app race passed functionally on race3, but user reports poor
+performance. The log records 2795 early UI batches and 2828 reader waits; six cube
+views each record hundreds of failed reuse attempts because snapshots remain
+retained by native texture consumers. Model sample bindings previously lasted
+until the next draw of that model. A car/model no longer drawn could therefore
+pin old cubemap faces indefinitely. The five-version pool eventually filled.
+
+FencedReadSlots now owns sampled resources with a copy of each submission fence.
+A weak registry in GraphicsState polls completion without blocking and releases
+read leases even when the consumer is inactive. Registration happens only during
+main-thread drawing, not async model construction. Model destruction still waits
+for its own GPU work; no strong registry/owner cycle was introduced. Tests cover
+inactive consumers and multiple slots retaining one shared target until all finish.
+
+Empty solid/blended phases for the active LOD are omitted; initial clear and
+joined-group depth resets are preserved even without geometry. The native app
+now follows the course/camera far plane rather than the legacy Switch 650 m cap.
+GLES keeps that cap; reflection capture and rear-view ranges remain intentional.
+Car shadows are existing CarVisual geometry routed through the native renderer.
+
+613 host tests passed, 235 skipped. Native and GLES SDK builds passed. Hardware
+performance improvement is pending. Do not infer race FPS from whole-app cadence:
+the prior trace also includes loading/menu time and a 50.48 s maximum interval.
+
+Race4 deployment: Switch/Desktop updated and FTP readback byte-identical.
+Matching ELF race4-debug; verified fallback race3-before-reader-fix.nro.
+Await the same race drive to measure the impact; do not claim 60 FPS yet.
+
+
+### Frame-wide native submission storage — race5 (2026-11-05, hardware pending)
+
+Race4 eliminated all recorded UI/target pressure waits, but user still reports
+poor driving/loading/exit performance. Its model summaries aggregate ~47.15 s of
+CPU fence waits over 291091 submissions. Two slots per model were repeatedly
+reused within one picture across wheels/phases/views. Native trace output also
+flushed to SD on every line during model loading/destruction.
+
+The native adapter now uses a shared FrameArena with three fenced frame banks.
+Each invocation gets distinct immutable command/uniform/light/fog/descriptor
+slices. Dynamic vertex snapshots are versioned within each bank/generation too.
+The only routine storage reuse wait is at the frame-bank boundary; a changed
+animated texture in the same bank and frame still waits before mutating that
+image's staging/pixels. Persistent per-bank texture images remain unchanged.
+Frame fences are signalled after all native 3D submissions before UI presentation;
+UI rendering does not use this arena. New chunks are reusable 4 MiB allocations,
+without redundant zero-fill for ranges fully initialized before use. Native model
+loading no longer preallocates separate draw/uniform/light/fog buffers per model.
+Command objects are allocated lazily and use shared memory slices. Legacy probe
+models without a frame arena retain their existing buffers/submission path.
+
+Per-model retirement now polls/waits its own last submission fences rather than
+forcing whole-queue idle repeatedly. Sampled-image lifetimes use a fence list so
+several invocations of one model in one bank all retain their resources. The weak
+main-thread reader registry still releases inactive consumers safely.
+
+Native trace lines are buffered in RAM (4 MiB bound) and flushed at context/app
+shutdown or fatal Deko callback. GT3R_DEKO_SYNC_LOG restores synchronous diagnostic
+writes. A CPU crash without orderly shutdown can lose buffered trace details;
+the next performance test must quit the app before opening FTP.
+
+617 host tests pass, 235 skipped, zero failures; native and GLES SDK builds pass.
+Tests cover frame bank reuse, no per-invocation wait/reset, completed bank reuse,
+failed waits preserving old storage, slice alignment/non-overlap/overflow and
+multiple unfinished reader leases in the same frame. SDK alignment constants
+checked: command memory 4 bytes, uniform buffers 256 bytes (arena slices 256).
+Hardware improvement remains unverified; do not infer race FPS from whole-app
+cadence which also contains loading and menus.
+
+Final native adjustment: models within one view keep the same render target bound
+and avoid redundant per-model fragment barriers. Initial view binding/barrier,
+mutated-texture upload barriers and the view completion fence/cache flush remain.
+Descriptors use immutable arena slices with nonblocking cache invalidation. Legacy
+models without a frame arena retain their original barriers.
+
+Race5 final build passed after barrier adjustments. Switch/Desktop NRO updated,
+FTP readback byte-identical. Matching ELF race5-debug; fallback
+race4-before-frame-arena.nro. Await hardware validation of load/drive/exit.
+
+
+### Race5 hardware confirmation — new baseline (2026-11-05)
+
+User confirms a large improvement in driving, loading and leaving the race.
+Residual drops occur on the main straight and around opponents. The matching
+route5_dry/_787b_91 log records 4736 ms for race loading, zero UI/target pressure,
+zero frame-arena reuse waits and 675185 completed reader leases retired. No
+failed native draw or Deko error marker was found. Model fence wait averages,
+weighted by invocation count, fell from ~0.162 ms/invocation in race4 to
+~0.0005 ms/invocation in race5. Sessions differ in duration; do not compare totals.
+Arena high-water storage is 243269632 bytes (~232 MiB), reused across frames.
+
+Whole-app cadence still contains menus/loading and is not a race-only FPS metric.
+Zero bank waits alone does not identify the remaining bottleneck as CPU or GPU.
+Preserve the validated race5 NRO/ELF as fallback. Next profiling should isolate
+straight/opponent workload (CPU collection/encoding, primitive count and actual
+GPU cost) before choosing another optimization; no graphics reductions applied.
+
+
+### Live race CPU/GPU profiling — dk-prof (2026-11-06, hardware pending)
+
+Preserves the validated race5 rendering and adds diagnostics to select the next
+straight/opponent optimization. Live race markers exclude quick-menu previews,
+pauses, demos, replays, finish panels and loading. Cadence is collected only across
+consecutive live presents. CPU scope includes animation uploads and separates
+simulation, render, collection, environment, draw/glows and acquire/UI/present.
+Model summaries count submissions, draws and emitted triangles by pass and role.
+CarVisual bodies/wheels/shadows are tagged Car; smoke is Effect; default Scene is
+labelled scenery_other. Main-body counts are drawn instances, not unique visible
+opponents (split views may duplicate them). Bounded worst-frame records include
+position/speed/body count and CPU data.
+
+Sparse GPU timestamp ranges rotate every32live frames after128warmup frames:
+environment face, wet scene, wet blur, initial main scenery, remaining cars/effects,
+main all, mirror and grade. Only one range is measured in each sampled frame.
+The scenery/cars boundary is the first scheduled Car item; the remainder includes
+late particles and any other trailing blended items. These are elapsed ranges,
+including GPU queue/CPU feeding gaps, not exclusive busy time; stages sampled on
+different frames must not be summed as one frame. Deko counter reports flush the
+tiled cache, so the diagnostic build has sampling overhead even without CPU waits.
+
+Verified the official SDK contract in devkitPro/deko3d Primer.md and dk_variable.cpp:
+ReportCounter writes two64-bit values (counter,timestamp), aligned16bytes. Arena
+stores a start/end pair in32bytes and reads only after its normal bank fence.
+Sampled banks request cache flush on that fence; no new CPU wait is introduced.
+Query command objects are reused, with immutable command slices per marker.
+Remaining reports are drained on arena destruction before reporting summaries.
+Invalid/unwritten/reversed reports are rejected. Logs remain RAM buffered and
+require orderly app exit before FTP retrieval.
+
+Metadata can change offsets/vtables without sizeof changes, so renderer ABI now
+also encodes layout revision1 in the feature word's high16bits. A test rejects old
+layouts with otherwise identical sizes. CPU tests cover cadence transitions,
+warmup/sampling rotation, body/work tagging, bounded diagnostics and invalid GPU
+reports.623host tests pass,235skip; native and GLES SDK builds pass. Device query
+execution still awaits validation. Matching profiler ELF must accompany the NRO;
+keep race5-hardware-validated.nro as the known-good fallback.
+
+Profiler deployment verified: final native/GLES SDK builds passed,623host tests
+passed(235skipped), NRO on Switch/Desktop and FTP download byte-identical.
+Matching gt3r-deko-prof-debug.elf; race5-hardware-validated.nro preserved.
+Next single test:90–120s normal Stage5race with opponents, quit the app, then FTP.
+
+
+### Clock correction and static packet culling — dk-cache (2026-11-06)
+
+User confirms overclock was active for ~20seconds, then disabled during the same
+profiled race. The trace deko-prof-oc-stock.log mixes clock conditions; neither its
+cadence mean nor previous unqueried demo/race5 runs establish stock FPS. GPU
+reports validated (zero invalid_reports); resource/bank pressure remains zero.
+Mixed-run observations guide work only: render CPU16.245ms, simulation2.285ms;
+sampled GPU elapsed main18.795ms, initial scenery14.020ms, cars/effects4.808ms.
+These ranges are from different frames and include CPU feeding gaps, not busy time.
+
+Added exact placement caching with invalidation before new placement (including
+partial failure) and geometry changes. Static scenery and repeat phases avoid
+recomputing world*local matrices. Texture-family serial fast path avoids repeated
+full revision scans; new geometry resets the consumer serial so animated revisions
+reapply. Existing per-bank GPU texture synchronization is preserved. Explicit
+cameras bypass placeholder trigonometry/look_at/perspective previously overwritten.
+
+Static Scene-role packets now use their individual assembled primitive spheres
+(conservatively enclosed in boxes) against the existing view culler. This rejects
+out-of-view primitives even inside a large visible mesh. Only frontend frustum
+culling, non-background/non-helper, unscaled modelview and never-updated geometry
+qualify. Moving vertices and scaled backdrops retain mesh policy; app car items
+have Car role. Original ordering and visible effects/distance remain unchanged.
+Counters record packet rejections and placement/texture cache hits.
+
+ClockReader polls read-only CPU/GPU/EMC service rates once per second. Modern
+clkrst sessions use the SDK-documented unk=3; older systems use pcv. No clock-setting
+API is called. Unknown/denied rates stay unknown. Configured service rates are not
+physical clock counter measurements. Frame-tagged changes are logged; delayed GPU
+reports resolve the configuration at their original frame. Global summaries still
+mix configurations when clocks change and explicitly warn. Keep the next test at
+constant stock settings from launch through the race, then quit the app for FTP.
+
+629 host tests pass,235skip; native/GLES SDK builds pass. Tests cover placement
+reuse/geometry invalidation/failure, serial atomicity, retrospective clock tagging,
+conservative packet bounds, mirrored views, nonuniform scaling and near/far/frustum
+crossings. Device speedup and rendering remain pending hardware confirmation.
+
+Cache/cull deployment verified: Switch/Desktop updated, FTP readback byte-identical.
+Matching gt3r-deko-cache-debug.elf; prior profiler and hardware-validated race5
+NROs preserved. Next run must keep overclock disabled from launch throughout.
+
+### Stock baseline and dedicated-demo comparison (2026-11-06)
+
+The cache/cull race test completed at constant configured service rates: CPU
+1020 MHz, GPU 307.2 MHz, EMC 1331.2 MHz (known_mask=7). Its live cadence averaged
+26.074 ms (~38.35 FPS); simulation CPU 2.941 ms, render CPU 18.934 ms. Main scenery
+recorded ~1189 draws/frame and cars ~509. No native failures, UI pressure waits,
+frame-bank waits or invalid GPU reports. This is the first instrumented constant
+stock baseline; the preceding mixed-OC run is not a valid performance A/B.
+
+The historical dedicated demo combines scenery and six Mazda instances into one
+Model, unlike the app's per-item model submissions. This is a structural difference,
+not yet a measured explanation of the FPS gap. The user recalls 60 FPS without OC.
+
+Rebuilt only the separate SDL demo as 0.6.1-dk-compare. It polls the same read-only
+clock services, logs clock changes with demo frame numbers, and reports main draw/
+triangle counts, preparation/simulation/environment/record/wait CPU and cadence
+after 120 warmup frames. It adds no GPU timestamp queries. Existing controls and
+rendering are preserved. Demo results are separate from RaceProfile: combined-scene
+data must not be mistaken for app per-role counters. This uses the current shared
+renderer, not a byte-identical reconstruction of the historical binary.
+
+Demo build/UAM pass; existing missing-field-initializers warning remains. The demo
+build now stages shader inputs locally before UAM, as the app build already does.
+Old device demo saved at /private/tmp/deko-demo-before-compare.nro. Test the dedicated
+GT3 SDL Deko3D Probe for 90–120 seconds at constant stock clocks, default settings,
+overlay off, then exit with +; log /switch/gt3r-deko-probe.log. Full app NRO unchanged.
+
+Device comparison result: /private/tmp/deko-demo-compare.log. Demo configured clocks
+remain 1020/307.2/1331.2 MHz, known_mask=7, matching the app stock baseline. After
+120 warmup frames, 6872 cadence intervals average 16.772 ms (~59.62 FPS), p95 upper
+bin 18.25 ms, p99 20.25 ms, maximum 24.520 ms. The user's stock-60 observation is
+supported by this measured run. All six physics cars run (five AI opponent summaries).
+Main scene averages 1930.90 draws and 50003.67 triangles/frame, record CPU 3.494 ms,
+slot wait 2.464 ms; simulation 1.718 ms, environment CPU .123 ms. Preparation 4.562 ms
+includes simulation/animation/transforms and must not be added to simulation again.
+The app main scene emits fewer draws/triangles (~1698/~43627), yet spends 5.545 ms
+recording main commands across ~82 submissions. Scene/frame sequences and effects
+are not identical, so this does not prove submission overhead explains the whole
+gap. It does rule out treating the demo's 60 FPS as merely an OC observation, and
+points to integrated scene preparation/submission/cache churn for further profiling.
+Avoid comparing the demo's main-record time against app total-render CPU (~19 ms):
+those scopes differ. No performance patch or app deployment in this comparison.
+
+### Immutable arena CPU visibility (0.6.1-dk-cache2, 2026-11-06)
+
+The user notes that demo shadows/other effects differ. Keep those effects in the
+app: main geometry counts alone do not establish equal total GPU work.
+
+Inspection of the local SDK source (maxwell/gpu_base.cpp) shows that L2Cache
+invalidation emits L2FlushDirty plus L2SysmemInvalidate. The frontend repeated
+that global operation, plus texture-data invalidation, at every model's descriptor
+binding, despite each invocation using its own immutable arena snapshot.
+
+FrameArena now prepares CPU visibility before the first model command-list consumer
+in each generation. Completed bank fences and cache-line-disjoint aligned slices
+allow later CPU-written snapshots to use the same preparation: no prior draw can
+read or populate those later slices. New chunk mappings conservatively invalidate
+the preparation so the next consumer queues another global operation. Commands
+have independent immutable arena storage; the reused query DkCmdBuf control list
+is consumed immediately by dkQueueSubmitCommands, as for timestamp reports.
+
+Arena descriptor bindings retain descriptor/header/sampler invalidation but omit
+the repeated L2 and texture-data invalidation. Fresh arena vertex snapshots use
+the same visibility preparation. Mutable animation staging, texture uploads,
+view render-to-sample boundaries, reader leases, retirement fences and legacy
+non-arena submission barriers retain their synchronization. No effects, shadows,
+resolution, draw distance, material ordering or geometry are removed.
+
+Native frame arena summary adds cpu_read_invalidations (all app frames, including
+menus, not solely live driving). 632 host tests pass, 235 skipped; tests cover
+cross-model/view sharing, bank reuse, failed enqueue/retry and same-frame heap
+growth. Native app/SDK/UAM build passes. Hardware speedup and graphics validation
+pending. Previous device NRO saved as gt3r-deko-cache-hardware-validated.nro and
+/private/tmp/deko-cache-before-cache2.nro; matching old cache-debug ELF retained.
+New matching ELF: gt3r-deko-cache2-debug.elf. No commit or push.
+
+Cache2 device log: /private/tmp/deko-cache2-stock.log. Constant service clocks
+1020/307.2/1331.2 MHz, known_mask=7. Live cadence 26.874 ms (~37.21 FPS), versus
+26.074 ms (~38.35 FPS) in cache1. These are different race sequences: 4+ body
+instances account for 3508/4425 intervals (~79%) versus 2806/5676 (~49%); main car
+draws increase from ~509 to ~656 and main submissions from ~82 to ~98. Thus no
+clear end-to-end speedup or regression established by this run. Heavy-body-bin
+cadence improves from 28.299 to 27.230 ms, while 2–3-body worsens from 23.899 to
+25.510 ms; bins alone do not control track position or car workload. Scenery CPU
+record remains ~3.16 ms. Native arena cpu_read_invalidations=4740 for all app
+frames (not just live), bytes=243269632, bank_waits=0; UI pressure waits=0 and
+invalid GPU reports=0. No native errors logged. This validates the counter path,
+not a claim that invalidations explained the main FPS gap.
+
+### CPU cost breakdown (0.6.1-dk-cpu, 2026-11-06)
+
+The existing total-render scope includes animation uploads and HUD/tail work not
+named in the old race summary; its draw scope also includes wet-road preparation.
+Main command record time alone is not the full app integration overhead.
+
+Added RAM-only CPU diagnostics, preserving cache2 rendering and effects:
+- race_animation_upload_cpu, race_wet_prepare_cpu (nested in draw), and
+  race_hud_tail_cpu (HUD/overlays after scene/perf logging).
+- Race frontend per-pass validation, target/lease selection, scheduling, and
+  dispatch. Phase checks, texture synchronization, model placement/camera and
+  model record+wait are nested in dispatch; do not add them a second time.
+- Race record stages per pass and main role: setup (including descriptor tables,
+  dynamic uploads and fixed state), mesh culling, packet/material command recording,
+  and queue submission/fencing. These partition record_cpu and exclude slot wait.
+
+Granular frontend stamps are enabled only in live race profiling. Model stamps
+add a fixed few reads per invocation; statistics are aggregated in bounded RAM
+and reported on exit, without periodic SD writes. Native GPU sampling remains
+unchanged. Added fields in RaceProfileCpu and SubmissionTiming are rebuilt together
+with app/engine/native backend. No new performance claim until device log arrives.
+
+632 host tests pass, 235 skipped, native app/UAM build passes. Known aggregate
+initializer/link-group warnings remain. Cache2 device NRO preserved as
+gt3r-deko-cache2-hardware-validated.nro with matching cache2-debug ELF. New symbols
+saved as gt3r-deko-cpu-debug.elf. CPU diagnostic NRO deployed to the experimental
+app path and Desktop; normal app startup, unchanged config. Next test: about one
+minute of Route 5 driving at stock clocks, normal exit, then ftpd for RAM log flush.
+
+CPU diagnostic result: /private/tmp/deko-cpu-stock.log. Constant stock service
+clocks 1020/307.2/1331.2 MHz, no invalid GPU reports, no bank waits. Live cadence
+27.598 ms (~36.23 FPS), main submits ~99/frame. Principal newly isolated CPU cost:
+animation upload 7.342 ms/frame (p95 8.25 ms), versus HUD/tail .783 ms and wet-road
+preparation .437 ms. Main model recording 5.763 ms partitions into setup 2.750,
+mesh culling .138, packets 2.762, queue submit/fences .114 ms. Car-role setup 2.022
+ms dominates its packet recording .679 ms. Main frontend validation .084, target
+.154, scheduling .137, dispatch 6.654 ms (nested model 5.830, phases .220, textures
+.082, placement .240). Hence raw queue submission calls are not the primary CPU
+cost; neither are phase scans or item transforms. Animation uploads are the next
+investigation target: CourseScene::upload_animations (CLUT refresh + moving nodes),
+wet/billboard CLUT uploads, TextureUpdates::apply and stable-topology updates. The
+7.342 ms includes these activities; do not attribute it solely to palette decoding
+without finer attribution. Preserve animated effects. No app change/deployment in
+this log-analysis turn.
+
+### Animation CPU storage reuse (0.6.1-dk-anim, 2026-11-06)
+
+TextureUpdates now recycles exclusively owned CPU pixel vectors instead of
+allocating/value-initializing a full image for every palette revision. Retained
+shared snapshots force a new allocation. All batch allocations are planned before
+mutating any revision; validation, serial exhaustion and failed allocations leave
+published state untouched. Raw borrowed input pointers are excluded from reuse,
+including cross-texture swaps, and duplicate indices retain last-update-wins
+semantics. Full-height images use one contiguous copy; tiny-image vertical
+expansion retains the exact prior mapping. GPU images/staging/leases are unchanged.
+Family destruction reports revision, allocation and reuse totals.
+
+Native GpuModel::update_geometry omits per-primitive sphere reconstruction only
+in the generic CPU metadata copy, which native views bypass. Public mesh bounds,
+indices, materials, vertex counts and optional retained CPU geometry still update.
+Actual native-model upload retains its original bounds; other rendering backends
+retain their guard-band packet spheres by default. This removes repeated work
+without changing native draw ordering, culling, animation rate or visible effects.
+
+For attribution, live animation uploads temporarily enable the existing RAM-only
+render_profile scopes, restoring the previous setting afterwards. New native race
+summaries distinguish palette refresh, moving-node mesh emission, texture revision
+preparation, native geometry updates and generic geometry metadata. These are
+nested components of animation_upload_cpu, not extra times to add to it.
+
+Host tests cover exclusive reuse versus retained snapshots, bad-batch atomicity,
+duplicate updates, raw-input swaps, full-height copying, tiny-image expansion, and
+metadata bounds omission with identical geometry/material packets. Device speedup
+is not yet measured. Previous CPU diagnostic NRO preserved as
+gt3r-deko-cpu-hardware-validated.nro with matching cpu-debug ELF.
+
+636 host tests pass, 235 skipped; native app/UAM build passes. Version
+0.6.1-dk-anim deployed to the experimental app path and Desktop; matching symbols
+saved as gt3r-deko-anim-debug.elf. Next run: Route 5, constant stock clocks,
+animations/effects enabled as before, normal exit before retrieving the RAM log.
+No config changes, commit or push.
+
+### Car-shadow isolation A/B (0.6.1-dk-shadow, 2026-11-06)
+
+The user prioritizes the unexplained demo/full-race gap over metadata savings.
+Existing video.car_shadows=off also omits the headlamp pool, so it cannot isolate
+only shadows. Added a native-app-only diagnostic video.deko_test_no_car_shadows
+(default off), read at race setup. CarLook.draw_shadows (default true) gates only
+node1/lamp/sun and node6 underbody shadow items. Node5/headlamp pool, its geometry,
+its ground placement/depth bias and all remaining effects stay on their normal
+path. Shadow resources are still prepared, preserving pool setup and avoiding an
+unrelated loading change. Generic renderer/default behavior remains unchanged.
+
+RaceProfileInfo records shadows_disabled. Exit summary logs live frames with and
+without the diagnostic; setup logs the selected state. No mixed-mode FPS claim.
+First device config prepared by adding only deko_test_no_car_shadows=on under
+[video]; original backed up at /private/tmp/deko-shadow-config-before.ini. Restore
+off for the second run using the identical NRO, leaving all other settings alone.
+
+Repeatable initial test protocol: same Arcade event, Route5, Mazda, starting grid,
+default external camera, stock clocks; remain stationary without changing camera
+for 60 seconds after the start lights, quit normally, open ftpd. Repeat identically
+with diagnostic off. AI still move; this controls player position/camera and event
+start, not every GPU frame. Inspect workload/time bins before attributing differences.
+This stationary test does not establish worst-case shadow cost while following cars.
+Prior anim NRO preserved as gt3r-deko-anim-hardware-validated.nro; matching anim ELF.
+
+636 host tests pass, 235 skipped; native SDK/UAM/app build passes. Shadow diagnostic
+NRO deployed to experimental Switch app and Desktop; FTP readback matches. Config
+for first no-shadow run uploaded and verified, original also saved as
+build-switch-deko-app/shadow-config-before.ini. Matching shadow-debug ELF saved.
+Next user completion should retrieve the log before changing the diagnostic back
+to off and requesting the identical stationary 60-second run with shadows present.
+
+Shadow A/B logs preserved as /private/tmp/deko-shadow-off-stock.log and
+/private/tmp/deko-shadow-on-stock.log. Both: stock service clocks
+1020/307.2/1331.2 MHz, all retained GPU slow samples at (-147.3,3.8), speed0,
+correct all-off/all-on diagnostic frame counters and zero invalid GPU reports.
+Live cadence off24.722 ms (~40.45 FPS), on26.367 ms (~37.93 FPS).
+Sampled scenery elapsed stays16.833/16.812 ms; cars/effects3.147/4.375 ms;
+main-all19.884/21.882 ms. These are non-exclusive elapsed ranges, not GPU busy.
+CPU render18.081/19.401 ms; main command recording4.332/4.552 ms. Animation
+uploads differ5.956/6.762 ms despite unchanged animation settings. Run duration
+also differs (~72.5 vs90.7 seconds of cadence intervals), and AI still move, so
+1.645 ms overall cadence delta is an observed difference, not an exact isolated
+shadow cost. Off still averages24.7 ms rather than16.7 ms: shadows contribute
+but do not explain the demo/full-race gap alone. Original shadows now restored
+via deko_test_no_car_shadows=off. No new deployment/config change in analysis.
+
+### Resolution sensitivity diagnostic (pending device run)
+
+Continue isolating the ~16.8 ms sampled scenery range before attributing it to
+exclusive GPU work. Current config backed up as /private/tmp/deko-fill-config-before.ini.
+Uploaded and readback-verified a single-setting change: video.render_scale1.0 to
+0.5. Shadow test remains off (actual shadows ON), all other settings unchanged.
+Existing native View3D sizes main targets by this scale; expect640x360 instead of
+1280x720, unchanged display/UI size, geometry and animations. Fixed-size offscreen
+passes need not scale. Same NRO; no source/build/commit/push changes for this test.
+
+Repeat stationary Route5 at the same start/camera for60 seconds, stock clocks.
+Compare target dimensions, emitted geometry and sampled ranges with shadow-on
+baseline; resolution sensitivity is evidence about pixel-dependent work, not a
+precise CPU/GPU busy split. Restore render_scale1.0 after capturing the result;
+this is a diagnostic, not an accepted quality reduction.
+
+Result /private/tmp/deko-fill-half-stock.log confirms640x360 main target, shadows
+ON, constant stock clocks, retained GPU samples all(-147.3,3.8), speed0, invalid0.
+Compared to720p stationary shadow-on baseline: main_scenery sampled elapsed
+16.812->5.255 ms, main_all21.882->7.477 ms, cars/effects4.375->2.240 ms. These are
+elapsed ranges with diagnostic overhead and potential CPU feeding gaps, but the
+large resolution sensitivity is strong evidence of expensive pixel-dependent
+work. Cadence26.367->23.353 ms (~37.93->42.82 FPS) improves much less; render CPU
+19.401->17.473 ms, animation6.762->5.716 ms. Simultaneous CPU work remains a
+limiter; a GPU-only fix is not sufficient evidence of60 FPS. Run duration and AI
+work differ (~121 versus91 seconds; main draws1512 versus1570), so avoid claiming
+precise isolated speedups. Fixed reflection/blur samples stay effectively equal.
+Restored render_scale1.0 in current device config, FTP readback verified. No source
+or NRO change. Next investigate main-scene pixel work (shader/material paths,
+overdraw, texture access and output settings) versus the dedicated demo while
+retaining the independently identified animation/metadata CPU target.
+
+### Native metadata-only geometry refresh (0.6.1-dk-meta)
+
+GpuModel::update_geometry previously packed full CPU vertex/index arrays again
+after successful native backend updates, even without keep_geometry. Introduced
+describe_model_geometry: computes unmerged public mesh/material/offset/bounds
+metadata directly, counts only valid complete triangles, and reuses metadata and
+primitive-vector capacity. No packed vertex/index copies or temporary per-packet
+index vectors are needed. Optional retained CPU geometry keeps the existing
+assembly path. Native uploader geometry/culling/packet order and GLES unchanged.
+
+638 host tests pass,235skip; native app/UAM build passes. Equivalence tests cover
+malformed triangles, texture clamping, empty/shrinking models and repeated vertex
+changes; native wrapper integration checks counts/bounds/transforms, keep_geometry
+and failed backend updates. Prior shadow NRO saved as
+gt3r-deko-shadow-hardware-validated.nro; new matching meta-debug ELF saved.
+Device speedup pending; existing metadata CPU counter measures the changed scope.
+Use stationary Route5 60-second test at restored720p with shadows/effects on.
+This addresses measured CPU duplication, not a claim that the pixel-dependent
+GPU cost or the whole demo gap has been solved. No config change, commit or push.
+
+Meta device result (/private/tmp/deko-meta-stock.log): cadence26.487 ms (~37.75
+FPS), metadata2.427 ms, animations6.660 ms, render19.342 ms. Main draws1570.22
+and triangles37817.79 closely match stationary shadow-on baseline. Stock clocks,
+shadows ON, no invalid GPU reports/bank waits. No speedup demonstrated.
+
+Follow-up source audit found CourseScene::set_moving unconditionally calls
+keep_geometry(), so the real animated scenery bypassed the new metadata-only
+path. Previous validation covered both wrapper modes but missed this caller.
+Corrected in0.6.1-dk-meta2: only non-native views request retained CPU moving
+geometry. The sole production geometry() reader is the generic View3D CPU clipper;
+native View3D returns through NativeView before that path and uses GPU clipping.
+Other renderer retention and explicit keep_geometry contracts remain unchanged.
+No shader, effects, scale or config change. Native app/UAM rebuild passes; meta
+NRO archived as gt3r-deko-meta-before-course-fix.nro. Next hardware log must confirm
+the metadata counter actually drops before claiming a speedup.
+
+### Arcade allocation failure and inherited policies (0.6.1-dk-resources)
+
+User reported slow Arcade car loads, a crash after a licence/Arcade sequence and
+stepped licence reflections. Performance experiments paused for stability.
+Preserved /private/tmp/deko-meta2-crash.log and latest Atmosphere report
+/private/tmp/deko-meta2-atmosphere.log (01793981299_01004ab00a260000.log).
+Log ends with Deko result1 (Fail), dkMemBlockCreate initialization failure during
+Trial Mountain/Corvette race loading, not an OpenGL call. Matching meta2 symbols
+resolve main-thread fatal callback -> _Exit -> libnx shutdown; crashed secondary
+thread is loudness measurement doing file I/O during shutdown. Do not label the
+primary logged failure an audio bug or proven system-RAM exhaustion. SDK source
+returns Fail for NV mapping/creation failure, separately from OutOfMemory.
+
+SDK nv.o reveals weak __nx_nv_transfermem_size=8 MiB. Native app now overrides
+to32 MiB for NV driver bookkeeping; strong symbol and actual0x02000000 ELF data
+verified. Production/GLES app retains its original SDK policy. This is a targeted
+capacity mitigation, not proof of the exact exhausted driver allocation.
+
+Reduce mapping pressure directly: native per-model vertex/index/descriptor storage
+is packed into one aligned allocation (previously three). Image storage remains
+separate. Frame descriptor templates are cached CPU vectors, no longer three
+GPU-mapped blocks per model; each submitted table is still an immutable fenced
+arena snapshot. Dynamic image staging/upload barriers and resource leases remain.
+Tests cover slice alignment, overflow, disjoint contents; native SDK build validates
+all address/descriptor changes, device rendering/lifetime validation pending.
+
+Audit confirms native GpuContext adoption bypasses GLES initialization and its
+freeze/PBO/UBO flags; native texture updates return before GLES freeze logic.
+However native reflection capture was64x64, one face per frame, inherited as a
+reduced policy. Now native deko_reflection_faces defaults6 (all faces every frame),
+optional1 is explicit native policy. Per-race face cursor replaces a static global;
+GLES cadence stays unchanged. Capture resolution remains64 per face. All-face
+updates add work: do not compare FPS against earlier one-face baseline as a pure
+optimization. Direct legacy glFinish diagnostic is now guarded away from native.
+Generic options such as full_car_detail remain shared; current config explicitly
+sets it off and was not silently rewritten. Valid CPU culling/glow visibility
+optimizations and pending native feature exclusions remain; do not claim every
+historical Switch policy has been removed.
+
+640 host tests pass,235skip; native app/UAM build passes. New matching resources
+debug ELF preserved, previous meta2 NRO archived. Experimental NRO copied to
+Switch/Desktop; config unchanged (720p, shadows on, no reflection override ->6).
+Next test is original reproduction: licence, scroll Arcade car previews, start
+the race that crashed, check reflections/geometry and normal exit/log retrieval.
+No commit or push. Crash resolution must be confirmed on hardware.
+
+Resource-build device result: /private/tmp/deko-resources-trialmt.log. Trial
+Mountain AEST0001/Corvette race loads in8181 ms and runs without the previous
+allocation error; menu previews~153–260 ms. This log contains the Arcade race,
+not the preceding licence sequence of the original report, so do not claim every
+original transition has been reproduced. Pool32 MiB, reflections6faces/frame,
+stock1020/307.2/1331.2MHz confirmed. Live cadence19.730 ms (~50.68 FPS), render
+CPU10.060, simulation2.293, animation2.423, metadata.147 ms. Different course
+from earlier metadata benchmark: no direct percentage speedup claim. Main sampled
+elapsed13.834 ms and post-grade3.066 ms (non-exclusive ranges on different frames,
+do not add as an exact frame budget). No invalid GPU reports or bank waits.
+
+### Precomputed native colour-grade contributions (0.6.1-dk-grade)
+
+The original post shader evaluates the grade curves, saturation coefficients and
+byte truncations per pixel. New helper precomputes three256-entry RGB contribution
+rows in a256x16RGBA8 texture (16 physical rows avoid the uploader's tiny-height
+expansion; only rows0..2 are used). Contributions are nonnegative; individually
+clamping each to255 preserves final min(sum,255), even at high saturation.
+Shader rounds the source to bytes as before, fetches three unfiltered texels,
+adds/saturates and preserves alpha. Effects, grade parameters and resolution stay.
+
+Each FrontendView caches its LUT by all six grade parameters, rebuilds only on
+changes and binds via the post pass's otherwise-unused sphere slot. The normal
+sampled-resource fence lease retains old LUT images if a preset changes while
+prior draws remain in flight. Invalid/nonfinite settings are rejected before
+upload. No permanent global cache or unbounded texture history is added.
+
+643 host tests pass,235skip, native app/UAM build passes. New tests compare lookup
+results against independent existing post_grade_pixel over channel ramps, mixed
+colours, inverted/equal levels, saturation0/>1/negative and curve changes, plus
+invalid settings. Hardware colour/speed validation remains pending; floating-point
+GPU/CPU rounding must still be checked visually. Prior resources NRO archived as
+gt3r-deko-resources-trialmt-validated.nro, matching resources ELF retained; new
+matching symbols gt3r-deko-grade-debug.elf. Test same Trial Mountain race at stock,
+check colours/brightness and exit normally for log comparison. No config edits,
+commit or push.
+
+Grade device result (/private/tmp/deko-grade-trialmt.log): same Trial Mountain
+AEST0001/Corvette, stock1020/307.2/1331.2MHz throughout. Live cadence18.397 ms
+(~54.36FPS), versus19.730 ms (~50.68FPS). Sampled post-grade elapsed3.066->1.846
+ms (~40% lower), main-all13.834->13.663 ms, UI CPU4.756->3.499 ms (includes waits,
+not pure UI arithmetic). Main work~1275draws/35651triangles versus1262/35227;
+race sequences/durations differ, so not every overall-FPS change is a controlled
+grade-only delta. LUT rebuilt twice, not perframe. No invalid GPU reports or bank
+waits. User reported test completed, without explicit visual-quality feedback.
+Hardware colour fidelity remains subject to observation; do not assert verified
+pixel-identical GPU output from CPU tests alone. Frame average still above16.67
+ms, p95 cadence23.25 ms, main GPU sampled max17.7 ms: stable60 not achieved.
+Further target is main scene pixel/overdraw work and car-heavy peaks; no additional
+source/config/deployment change in this log-analysis turn.
+
+### Race body back-face material policy (0.6.1-dk-body)
+
+Audit found native rasterization still explicitly excluded car meshes from back-
+face culling as a bring-up policy, except sphere-map items. Generic View3D uses
+Back by default and respects kDoubleSided. Native race body items already carry
+car_surface, distinguishing them from wheels/shadows/headlamp pools/morph helpers.
+
+New native_packet_cull helper includes car_surface in the existing material
+policy. Preserves double-sided flags, explicit overrides, single-sided forcing,
+mirrored front/back inversion, background exclusion and legacy probe behavior.
+Wheels, projected shadows, lamps and untagged helper meshes retain prior policy.
+No draw reordering, material/alpha/depth change, resolution or effect removal.
+Counters log backface-enabled vs two-sided body packets at model destruction;
+these are submitted policies, NOT measured GPU rejection counts.
+
+Independent offline check of existing private Mazda packets: route5-061.gtdk base
+body has3250 normal-aligned triangles,15 opposed,2 degenerate/zero; brake variant
+3254/15/2. This supports the expected winding, not proof for every vehicle or
+camera. No indices/normals are rewritten. Hardware body/glass validation required.
+
+645 host tests pass,235skip; native app/UAM build passes. Tests cover body material
+flags, mirrors, explicit overrides/backgrounds and unchanged wheel/shadow/helper/
+legacy policy. Grade baseline NRO saved as gt3r-deko-grade-trialmt-baseline.nro;
+matching grade ELF retained. New matching symbols gt3r-deko-body-debug.elf.
+Experimental NRO deployed to Switch/Desktop. Next: same Trial Mountain race at
+stock for~90seconds, opponents ahead if possible; check body/glass from different
+views for missing/reversed faces. Performance gain remains unmeasured. No config
+change, commit or push.
+
+Body-culling device log: /private/tmp/deko-body-trialmt.log. Constant stock clocks,
+same Trial Mountain event/Corvette, no invalid GPU reports. Body counters confirm
+2472229 backface-enabled submitted packets,0 two-sided packets for the bodies
+drawn in this run (not actual GPU-rejected triangle counts). Live cadence18.787
+ms (~53.23FPS), versus grade baseline18.397 (~54.36FPS). Work differs substantially:
+main car draws522.36/frame versus339.03 (+54%), car triangles13021.83 versus
+8849.91 (+47%); 4+ body intervals2591/5879 (~44%) versus1064/5562 (~19%).
+Thus no isolated speedup/regression can be concluded from the overall average.
+4+ body cadence19.510 versus20.592 ms is encouraging but not position-controlled;
+do not quote it as a measured culling gain. Sampled scenery10.111 versus10.026 ms,
+cars/effects4.033 versus3.202, main-all14.261 versus13.663; grade1.822 versus1.846.
+User reported test completed, without explicit visual-quality feedback. No new
+deployment/config change in this log-analysis turn; scenery remains the principal
+average sampled range. Preserve the grade baseline for controlled comparison.
+
+### GLES separation audit and ordinary scenery shader (0.6.1-dk-common)
+
+User asks whether every OpenGL trace is gone. Answer: no. The shared engine and
+experimental target still link EGL/GLESv2/glapi/drm_nouveau; legacy renderer code
+remains. Normal native startup creates only Deko and adopts NativeRenderer instead
+of GLES initialization. Native draw/update/destruction returns before GL branches;
+direct race glFinish is guarded away. This is not a compile-time GLES-free binary,
+nor evidence that GL runs a second scene. Shared settings (e.g. explicit config
+full_car_detail=off) and some shared Switch policies remain. Do not claim that
+removing linked libraries alone removes measured GPU pixel work.
+
+Scenery specialization: compile model.frag twice. Common variant inserts
+GT3R_COMMON_FRAGMENT after #version and excludes only the unreachable special-mode
+branches. Exact source tail, alpha/far tests, GS sampling, fog, RGB5 and arithmetic
+remain shared. CPU selects it only for Main pass Scene-role items with final shader
+mode exactly0 or1; all cars, effects, menus/Other, environment, wet, mirror and post
+passes retain the full shader. Reflection/sphere/debug modes2..8 always use full.
+Fragment stage is switched only when selected program changes; vertex stage stays.
+Counters log common/general submitted packets and program switches at destruction.
+
+SDK DKSH metadata: full fragment code15616 bytes/21GPR, common3072 bytes/20GPR,
+both0 scratch. This proves smaller code, not a measured GPU speedup or occupancy
+improvement. App/prototype shader builders both stage/compile the added asset;
+dedicated legacy demo leaves the optional common shader pointer null. All native
+model replacements receive the same shader pointers. Code pool128KiB has headroom.
+
+646 host tests pass,235skip; native app/UAM build passes. New selection test covers
+all special modes, no shader available, legacy/capture/post paths and every
+non-Main pass plus car/effect roles. No scene ordering, geometry, effects, resolution
+or config changes. Prior body NRO saved as gt3r-deko-body-trialmt-baseline.nro,
+matching body ELF retained; new common-debug ELF saved. NRO deployed to experimental
+Switch/Desktop. Next same Trial Mountain~90seconds stock; check textures, fog,
+brightness and log shader coverage/switch counts and sampled main-scene elapsed.
+Performance and graphics validation pending hardware. No commit/push.
+
+### Per-frame ordinary resource retirement (0.6.1-dk-retire)
+
+Latest Trial Mountain CPU profile attributes1.898 ms/frame to environment-view
+target preparation across six views, versus.711 ms dispatch. This target scope
+includes global reader/image sweeps, version selection and other setup: not an
+exclusive GC timer. Source repeats both global sweeps before every native view.
+
+FrameResourceSweep schedules the ordinary pre-view sweep once per actual present
+epoch. All six cube faces/main/post can share it; early UI flushes do not advance
+the epoch. Pool-pressure paths force a fresh sweep after submitting pending UI,
+and existing UI-reader/write-fence waits remain. Upload, descriptor-exhaustion,
+UI-recording and UI-drain collection calls stay independent and unchanged; do not
+claim every collection subsystem runs only once. Image uploadSubmitted is cleared
+after initial upload completion/staging cleanup, avoiding repeated polling of an
+already-completed immutable upload. Target writes retain separate fences/leases.
+
+Counters report scheduled_sweeps/skipped_views/pressure_sweeps. 648 host tests
+pass,235skip; native app/UAM build passes. Tests combine real retained-resource
+weak references with eight same-frame views, unfinished fences, GPU progress and
+forced same-frame pressure collection, next-frame cleanup and callback retry.
+No effects, shadow policy, six-face reflection cadence, resolution or shaders
+change. Prior common NRO saved as gt3r-deko-common-trialmt-baseline.nro; matching
+common ELF retained. New symbols gt3r-deko-retire-debug.elf; experimental NRO
+deployed to Switch/Desktop. Device gains and pool behavior pending validation.
+
+User asks whether gains apply to Special Stage Route5. Metadata/resource/common
+Main-scene shader paths are shared; grade LUT benefits only tracks with grade on.
+Night adds wet-road/lighting/glows and now has six-face reflections unlike older
+Route5 baselines, so no transferable FPS claim or direct old/new percentage.
+Next run Route5~90seconds at stock, same usual car/camera, include traffic, normal
+exit and ftpd. This is a current night baseline and a targeted resource-path check,
+not a controlled per-patch speedup comparison to the old one-face build.
+No config changes, commit or push.
+
+Common-shader device result: /private/tmp/deko-common-trialmt.log. Same Trial
+Mountain event/Corvette, constant stock1020/307.2/1331.2MHz, invalid GPU reports0,
+bank waits0. Live cadence17.851 ms (~56.02FPS), versus body18.787 (~53.23FPS).
+Sampled scenery10.111->8.142 ms, main-all14.261->12.158, cars/effects4.033->4.002,
+post1.822->1.852 ms. Main triangles40536 versus40188, car triangles14417 versus
+13022; moving traffic/camera/race duration still prevent a strictly isolated A/B.
+All traffic bins improve in average (0/1 bodies17.171->16.845,2/3 bodies19.284->
+17.558,4+bodies19.510->18.634 ms), not matched positions. CPU render10.829->11.254
+ms, main record2.864->3.226; UI CPU including waits3.064->1.564 ms. Main car draw
+count increases522->563. Counters show5641028 common packets,5362045 general,
+56439 switches over all model lifetimes: specialization used extensively without
+per-packet program churn. No fresh source/config/NRO change in this analysis turn.
+Average remains above16.67ms, p95 cadence24ms; do not claim stable60. User reported
+completion, no explicit graphics feedback. Next investigate remaining ordinary
+fragment arithmetic and main CPU cost while preserving this tested baseline.
+
+Animation optimization device result: /private/tmp/deko-anim-stock.log. Clocks
+constant at 1020/307.2/1331.2 MHz. Live cadence 25.682 ms (~38.94 FPS), render CPU
+18.438 ms versus prior diagnostic 20.251 ms; animation upload 6.331 ms versus
+7.342 ms (~1.01 ms /14% lower). Race scenes differ (main submissions ~93 versus
+99 and draws ~1788 versus1923), so not all cadence/render change is attributable
+to the patch. Pixel storage records 49 allocations and140883 reuses across three
+families. No bank waits or invalid GPU reports.
+
+New attribution: palette refresh .320 ms, texture revision .091 ms, moving-node
+emission 2.693 ms, backend geometry updates .737 ms and generic CPU metadata
+reassembly 2.422 ms. Thus most remaining animation CPU work is moving geometry
+emission plus redundant generic metadata rebuilding, not palette recolouring.
+Next target is the native GpuModel::update_geometry metadata assembly path, which
+still packs/sanitizes index/vertex lists despite native backend owning its own
+geometry. Preserve public metadata/counts and optional retained CPU geometry;
+do not simply drop meshes_ or skip updates. No new deployment in this analysis.
+
+### Retirement Route5 result and reflection projection (0.6.1-dk-envmath)
+
+Retirement device log: /private/tmp/deko-retire-route5.log. Arcade
+G_80sports_n_0002, route5_dry, Mazda787B; clocks constant1020/307.2/1331.2MHz,
+six64x64 reflection faces per frame. Live cadence22.436ms (~44.57FPS), p95
+upper28.75ms, p99upper33ms. CPU render14.311ms, simulation2.575ms, animation
+upload3.664ms (moving emission2.256ms, native geometry.733ms, metadata.222ms),
+glows2.325ms. Sampled main-all elapsed18.778ms, scenery13.241ms, cars/effects
+5.447ms. GPU elapsed includes feeding gaps and ranges from different frames must
+not be added. Main workload~1786draws/45573triangles per frame. No post-grade
+samples on this night preset, so the grade LUT cannot explain a direct night gain.
+
+Resource sweep counts:5955scheduled,47720skipped views,0pressure sweeps. This
+confirms coalescing is active without observed pool pressure. Environment target
+preparation.424ms across six views, but no matched Route5 pre-retirement run:
+do not attribute an isolated FPS delta to the sweep change or compare it directly
+with older one-face reflection night runs. Arena327155712bytes,bankwaits0,
+GPUinvalid0. Initial live stalls remain (max282.93ms); stable60 not achieved.
+
+The GT3 car environment projection previously computed acos, sin, asin, atan,
+sin/cos per fragment. On the regular path, half/double-angle identities replace
+these with square roots and xy normalization, preserving the projection, tilt,
+cube sampling, strength and reflection update rate. Tiny xy retains the original
+trigonometric path to preserve pole/seam behavior without amplifying coordinates.
+No effect removal, resolution, shadow, reflection-face or config change.
+
+CPU counterpart tests compare against an independent double-precision original
+trigonometric reference across65536 random normalized and unnormalized vectors,
+plus pole/seam/z-clamp cases. Direction and unit-length error <2e-5 in tests;
+this is not proof of pixel-identical shader output on hardware. 650 host tests
+pass,235skip; native app/UAM build passes. General shader15872bytes/22GPR/0scratch
+(previous15616/21/0, because the rare fallback remains); common shader stays
+3072bytes/20GPR/0scratch. No speedup is claimed before device measurement.
+
+Retire Route5 NRO archived as gt3r-deko-retire-route5-baseline.nro, matching retire
+ELF retained; new symbols gt3r-deko-envmath-debug.elf. Next same Route5/Mazda race
+~90seconds at stock, traffic visible, check body colours/reflections for seams or
+shimmer, exit normally and open ftpd. Experimental NRO uploaded to Switch,
+FTP readback byte-identical, Desktop copy updated. No commit/push.
+
+### Environment-math result and pre-raster distance clipping (0.6.1-dk-clip)
+
+Device log /private/tmp/deko-envmath-route5.log: same Route5/Mazda event, stock
+1020/307.2/1331.2MHz, six reflection faces, shadows on. Live cadence22.614ms
+(~44.22FPS), versus22.436ms/~44.57FPS. Main draws1875 versus1786, triangles47445
+versus45573, car draws649 versus608;4+ body frames~81.5% versus~64.1%. Sampled
+cars/effects5.804 versus5.447ms, scenery12.879 versus13.241, main-all18.468 versus
+18.778. These are elapsed samples including feeding gaps, not pure GPU busy time.
+No isolated speedup/regression from reflection math can be established with these
+different workloads.4+ body cadence22.937 versus23.299ms is suggestive, not a
+position-controlled comparison. Render CPU14.738ms, simulation2.583ms, moving
+emission2.483ms, glows2.427ms. GPUinvalid0, bankwaits0, pressure sweeps0. User
+reported completion, no explicit visual-quality feedback. Preserve envmath NRO
+as gt3r-deko-envmath-route5-baseline.nro and its matching envmath-debug ELF.
+
+Source audit: far_clip was applied by model.frag discard, after reaching fragment
+processing. Move the same positive half-space (far+dot(viewZ,worldPosition)) to
+model.vert gl_ClipDistance[0], before any early returns; remove the fragment far
+discard. Deko initializes ClipDistanceEnable=0xFF (SDK gpu_3d_base.cpp); UAM
+compiles the clip-distance export. Existing scene_fog supplies exactly the same
+item-adjusted distance and zero for backgrounds/helpers; post also forces zero.
+Zero/negative limits export1, so these passes remain unclipped by this plane.
+Capture uses its prior zero limit. Keep projection/depth, alpha tests, fog,
+materials, car reflections, shadows, resolution and the configured far distance.
+This does not implement the pending GS guard-band subdivision behavior.
+
+ViewCuller also receives this optional seventh plane from the same view and
+packed distance. Fully distant mesh/primitive bounds can now be rejected before
+submission; bounds crossing the plane remain. Background culler omits it. Other
+callers retain the original six-plane behavior through the zero default.
+
+652 host tests pass,235skip; native app/UAM build passes. Added tests cover fully
+distant/crossing/exactly-on-plane bounds, disabled/negative limits, translated/
+rotated/mirrored views and transformed/nonuniformly scaled geometry; half-space
+signs match the prior pixel depth predicate over a point grid. A fixed3e-5m test
+tolerance initially failed at600m: standalone diagnostic found exactly one ULP
+(6.1035e-5m) reassociation error and zero sign differences. Test now uses a
+scale-aware two-epsilon rounding bound, not a changed production plane.
+Existing scene_fog tests cover scale-adjusted distance and helper/background
+exclusions. Common fragment2816bytes/20GPR, general15616/22, vertex6144/35;
+all0scratch. No hardware speed/visibility claim yet. Matching new symbols saved
+as gt3r-deko-clip-debug.elf. Next same Route5/Mazda~90seconds stock, check track
+and buildings for new popping/holes, normal exit and ftpd. Experimental NRO
+deployed to Switch with byte-identical FTP readback; Desktop copy updated.
+No config change, commit or push.
+
+### Rejected clip-distance experiment: hardware regression and full rollback
+
+0.6.1-dk-clip is REJECTED. User reports severe visual glitches; downloaded latest
+Switch screenshot2026110618495600-1E1800B8D04F999C436DDFE2B8CD0B81.jpg to
+/private/tmp/deko-clip-glitch.jpg. Image shows large black rectangular missing
+regions on nearby road and clipped/missing car surfaces, with HUD/sky still
+present. This is not acceptable far-distance popping. Log saved separately as
+/private/tmp/deko-clip-glitch.log; GPUinvalid0 does NOT imply visual correctness.
+Do not interpret its shorter timings as an optimization gain with missing pixels.
+
+Immediately restored archived0.6.1-dk-envmath NRO to experimental Switch and
+Desktop. FTP readback /private/tmp/deko-envmath-restored-readback.nro matches the
+archived baseline byte-for-byte. Removed the full experiment from source: vertex
+clip export, seventh CPU plane/helper and its isolated tests; restored original
+fragment distance discard and six-plane culler, version0.6.1-dk-envmath. Earlier
+native improvements remain. Native rebuild/UAM pass;650 host tests pass,235skip.
+Mathematical CPU equivalence and UAM compile success did not validate on-device
+clipping/interpolation. Exact GPU cause remains unisolated; do not assert a UAM
+compiler bug or particular Deko state fault without a minimal reproduction.
+
+Rejected NRO retained as gt3r-deko-clip-rejected.nro, matching clip-debug ELF kept
+for isolated diagnosis. Existing envmath baseline/symbols remain. No new
+optimization mixed into the rollback, no config change, commit or push.
+Local default NRO/ELF outputs also restored from the archived matching envmath
+pair after checking the rebuild; Switch/Desktop use the archived baseline, not
+an untested replacement. Rebuilt vertex/full fragment/capture/UI shaders match
+baseline bytes; common fragment has two instruction-byte differences with equal
+size/GPR count (cause not investigated). No claim of a bit-identical rebuild.

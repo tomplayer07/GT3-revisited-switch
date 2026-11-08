@@ -240,6 +240,7 @@ void TyreSmoke::add_items(std::vector<render::DrawItem>& items, const render::Ve
     gpu->update_vertices(verts_);
     render::DrawItem it{gpu, {}, 0};
     it.helper = true; // never culled (positions change every frame)
+    it.profile_role=render::ProfileRole::Effect;
     it.late = true;   // after the whole scene and the heat haze (presentation §L6)
     items.push_back(it);
 }

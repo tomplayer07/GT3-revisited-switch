@@ -6,12 +6,19 @@
 #include <cstdint>
 #include <span>
 #include "render/math3d.h"
+namespace gt3r::render { struct DrawOptions; struct DrawItem; }
 namespace gt3r::sim { struct VehicleState; struct VehicleSetup; }
 namespace gt3r::scene { struct Model; struct Vertex; }
 namespace gt3r::deko_probe {
 struct WheelBinding { int index=-1; bool spin=true; render::Vec3 center{}; };
-struct SubmissionTiming { double wait=0, record=0; };
+struct SubmissionTiming { double wait=0, record=0; uint64_t draws=0,triangles=0; double setup=0,cull=0,packets=0,submit=0; };
+class Model;
+class FrameArena;
 struct SceneOptions {
+    bool frontend=false;
+    const Model* textureSource=nullptr; // immutable original images borrowed from a retained model
+    FrameArena* frameArena=nullptr;
+    DkQueue uploadQueue=nullptr; // optional isolated loader queue, completed before return
     bool freeCamera=false;
     bool captureEnvironment=false;
     std::array<float,4> camera{}; // XYZ and yaw
@@ -21,7 +28,8 @@ struct SceneOptions {
 // Borrows device/queue/shaders; destroy before their owner.
 class Model {
 public:
-    Model(DkDevice device, DkQueue queue, const DkShader* vertex, const DkShader* fragment, const DkShader* capture);
+    Model(DkDevice device, DkQueue queue, const DkShader* vertex, const DkShader* fragment, const DkShader* capture,
+          const DkShader* common = nullptr, DkGpuAddr sharedSamplerDescriptors = 0);
     ~Model();
     void load(const char* path, std::span<const uint8_t> course = {}); // diagnostic packet adapter
     void load_scene(const scene::Model& model, const SceneOptions& options = {});
@@ -60,8 +68,13 @@ public:
     void submit(unsigned slot, float angle, unsigned width, unsigned height);
     // Explicit target for the game frontend adapter; same reversed-depth convention.
     void submit_to(unsigned slot, unsigned width, unsigned height, const DkImage* color,
-                   const DkImage* depth, const std::array<float,4>& clear);
+                   const DkImage* depth, const std::array<float,4>& clear,
+                   const render::DrawOptions* options = nullptr, const DkImageDescriptor* sphere = nullptr,
+                   const render::DrawItem* item = nullptr, bool clear_target = true, bool draw_geometry = true,
+                   const DkImageDescriptor* cube_faces = nullptr, const DkImageDescriptor* image = nullptr, unsigned phase = 0, bool post = false);
     SubmissionTiming submission_timing() const;
+    DkFence submission_fence(unsigned slot) const;
+    void wait_submissions();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -25,7 +25,16 @@ void RaceScreen::start(App& app, const Replay* replay) {
     imperial_ = speed_unit().value_or(imperial_);
     env_cube_on_ = app.config().get("video", "car_reflections").value_or("on") != "off";
     if (SDL_getenv("GT3R_NO_ENV")) env_cube_on_ = false;
+    native_env_face_=0;
+    native_env_faces_=app.config().get("video", "deko_reflection_faces").value_or("6") == "1" ? 1u : 6u;
+    if(app.gpu() && app.gpu()->native_renderer())
+        LOG_INFO("Deko race reflections: %u faces/frame, 64x64 per face; independent of GLES cadence",native_env_faces_);
     shadows_on_ = app.config().get("video", "car_shadows").value_or("on") != "off";
+    deko_test_no_car_shadows_ = app.gpu() && app.gpu()->native_renderer() &&
+        app.config().get("video", "deko_test_no_car_shadows").value_or("off") == "on";
+    if(app.gpu() && app.gpu()->native_renderer())
+        LOG_INFO("Deko shadow diagnostic: car shadows %s; headlamp pools retain normal settings",
+            deko_test_no_car_shadows_ ? "off" : "on");
     full_car_detail_ = app.full_car_detail();
     showroom_wheels_ = app.showroom_wheels();
     heat_haze_ = to_lower(app.config().get("video", "heat_haze").value_or("off")) == "on";
@@ -61,6 +70,11 @@ void RaceScreen::start(App& app, const Replay* replay) {
     if (!app.gpu()) {
         error_ = "The time trial needs the 3D renderer (GPU unavailable)";
         return;
+    }
+    if (app.gpu()->native_renderer()) {
+        wheel_spin_blur_=false;
+        LOG_INFO("Deko3D experimental race: native scene/cars/reflections/wet-road/mirrors/grade; wheel spin blur disabled");
+        LOG_INFO("Deko3D pending parity: GS guard-band subdivision, replay depth-of-field/trail/dissolve; glows composed after grade");
     }
     const CourseEntry& ce = courses_[size_t(course_sel_)];
     const CarEntry& ca = cars_[size_t(car_sel_)];

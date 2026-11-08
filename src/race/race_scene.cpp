@@ -202,7 +202,9 @@ void CourseScene::set_moving(Moving& m, render::GpuContext& ctx, const render::G
     if (!textures || nodes.empty()) return;
     m.nodes = std::move(nodes);
     m.gpu = std::make_unique<render::GpuModel>(ctx, *textures);
-    m.gpu->keep_geometry();
+    // Only the generic view's CPU guard-band clipper reads this copy.
+    // Native views own their buffers and clip on the GPU.
+    if (!ctx.native_renderer()) m.gpu->keep_geometry();
     size_t n = 0, parts = 0;
     for (const gtm1::AnimatedNodes& a : m.nodes) n += a.nodes().size(), parts += a.part_count();
     LOG_INFO("Course: %zu moving nodes, %zu parts", n, parts);
@@ -553,17 +555,18 @@ void CarVisual::add_items(std::vector<render::DrawItem>& items, const sim::Vehic
             auto shadow = [&](const render::GpuModel* m, const render::Mat4& t, float alpha) {
                 render::DrawItem it{m, t, lod};
                 it.alpha = alpha;
+                it.profile_role=render::ProfileRole::Car;
                 it.in_order = true;
                 it.far_whole = true;
                 items.push_back(it);
             };
-            for (int k = 0; shadow_[0] && k < look.lamp_shadows && k < 4; ++k)
+            for (int k = 0; look.draw_shadows && shadow_[0] && k < look.lamp_shadows && k < 4; ++k)
                 if (look.lamp_alpha[k] > 0.01f)
                     shadow(shadow_[0].get(), bias * g * shear(look.lamp_shear[k]), look.lamp_alpha[k]);
-            if (shadow_[0] && look.lamp_shadows == 0 && look.shadow * shadow_params_.brightness > 0.01f)
+            if (look.draw_shadows && shadow_[0] && look.lamp_shadows == 0 && look.shadow * shadow_params_.brightness > 0.01f)
                 shadow(shadow_[0].get(), bias * g * sh, look.shadow * shadow_params_.brightness); // > 1: blend clamps
             if (shadow_[2]) shadow(shadow_[2].get(), bias * g * flat, 1);
-            if (shadow_[1]) shadow(shadow_[1].get(), bias * g * flat, 1);
+            if (look.draw_shadows && shadow_[1]) shadow(shadow_[1].get(), bias * g * flat, 1);
         }
     }
     // Keep shadows/headlamp pools above even if their emitting car is outside
@@ -655,6 +658,7 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
                                int lod, bool wheel_fx) const {
     render::Mat4 world = pre * car_matrix(s);
     auto styled = [&](render::DrawItem it, bool body_surface = false) {
+        it.profile_role=render::ProfileRole::Car;
         it.car_surface = body_surface;
         it.far_whole = true;
         for (int k = 0; k < 3; ++k) it.light_scale[k] = look.light_scale[k];

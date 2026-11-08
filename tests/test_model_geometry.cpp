@@ -17,6 +17,41 @@ scene::Mesh triangle_mesh() {
     mesh.primitives={a,b,c};
     return mesh;
 }
+TEST(native_metadata_matches_packed_geometry_across_invalid_triangles_and_repeated_updates) {
+    auto input=triangle_mesh();
+    input.lod=2; input.transform[12]=7;
+    input.indices.insert(input.indices.end(),{0,99,1,0,1,2});
+    auto p=input.primitives[0]; p.first_index=9; p.index_count=6; p.texture=8;
+    input.primitives.push_back(p);
+    p.first_index=std::numeric_limits<u32>::max(); p.index_count=12;
+    input.primitives.push_back(p);
+    std::vector<scene::Mesh> source{input,{},input};
+    std::vector<ModelMeshInfo> metadata;
+    for(unsigned frame=0;frame<4;++frame) {
+        if(frame==1) source[0].vertices[1].pos[0]=20;
+        if(frame==2) source={scene::Mesh{}};
+        if(frame==3) source={};
+        std::vector<scene::Vertex> vertices; std::vector<u32> indices;
+        std::vector<ModelMeshInfo> packed;
+        assemble_model_geometry(source,1,false,vertices,indices,packed,false,false);
+        CHECK(describe_model_geometry(source,1,metadata)==vertices.size());
+        CHECK(metadata.size()==packed.size());
+        for(size_t m=0;m<packed.size();++m) {
+            const auto& a=packed[m]; const auto& b=metadata[m];
+            CHECK(a.transform.m==b.transform.m); CHECK(a.lod==b.lod);
+            CHECK(a.vertex_offset==b.vertex_offset); CHECK(a.index_offset==b.index_offset);
+            CHECK(a.line_first==b.line_first); CHECK(a.line_count==b.line_count);
+            CHECK(a.center.x==b.center.x); CHECK(a.center.y==b.center.y); CHECK(a.center.z==b.center.z); CHECK(a.radius==b.radius);
+            CHECK(b.primitive_spheres.empty()); CHECK(a.primitives.size()==b.primitives.size());
+            for(size_t i=0;i<a.primitives.size();++i) {
+                CHECK(a.primitives[i].first_index==b.primitives[i].first_index);
+                CHECK(a.primitives[i].index_count==b.primitives[i].index_count);
+                CHECK(a.primitives[i].flags==b.primitives[i].flags);
+                CHECK(a.primitives[i].texture==b.primitives[i].texture);
+            }
+        }
+    }
+}
 }
 TEST(model_geometry_preserves_order_for_native_material_packets) {
     const auto input=triangle_mesh();
@@ -36,6 +71,29 @@ TEST(model_geometry_preserves_order_for_native_material_packets) {
         CHECK(mesh.primitive_spheres[0].center.x==1);
         CHECK(mesh.primitive_spheres[0].center.y==1);
     }
+}
+TEST(model_geometry_can_skip_unused_packet_bounds_without_changing_draws_or_mesh_bounds) {
+    const auto mesh=triangle_mesh();
+    std::vector<scene::Vertex> withVertices,withoutVertices;
+    std::vector<u32> withIndices,withoutIndices;
+    std::vector<ModelMeshInfo> withBounds,withoutBounds;
+    assemble_model_geometry({mesh},0,false,withVertices,withIndices,withBounds,false,true);
+    assemble_model_geometry({mesh},0,false,withoutVertices,withoutIndices,withoutBounds,false,false);
+    CHECK(withIndices==withoutIndices); CHECK(withVertices.size()==withoutVertices.size());
+    CHECK(withBounds.size()==1); CHECK(withoutBounds.size()==1);
+    if(withBounds.empty() || withoutBounds.empty()) return;
+    const auto& a=withBounds[0]; const auto& b=withoutBounds[0];
+    CHECK(a.primitive_spheres.size()==3); CHECK(b.primitive_spheres.empty());
+    CHECK(a.center.x==b.center.x); CHECK(a.center.y==b.center.y); CHECK(a.center.z==b.center.z); CHECK(a.radius==b.radius);
+    CHECK(a.vertex_offset==b.vertex_offset); CHECK(a.index_offset==b.index_offset);
+    CHECK(a.primitives.size()==b.primitives.size());
+    for(size_t i=0;i<a.primitives.size();++i) {
+        CHECK(a.primitives[i].first_index==b.primitives[i].first_index);
+        CHECK(a.primitives[i].index_count==b.primitives[i].index_count);
+        CHECK(a.primitives[i].flags==b.primitives[i].flags);
+    }
+    for(size_t i=0;i<withVertices.size();++i) for(unsigned k=0;k<3;++k)
+        CHECK(withVertices[i].pos[k]==withoutVertices[i].pos[k]);
 }
 TEST(model_geometry_retains_production_merging_and_local_wire_indices) {
     std::vector<scene::Vertex> vertices;

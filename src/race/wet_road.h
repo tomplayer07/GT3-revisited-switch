@@ -82,6 +82,10 @@ public:
     SDL_GPUTexture* render(render::View3D& view3d, const render::Mat4& view, const render::Mat4& proj,
                            const render::Vec3& eye, const std::vector<render::DrawItem>& items,
                            const render::DrawOptions& main);
+    std::shared_ptr<render::NativeTexture> render_native(render::View3D& view3d,const render::Mat4& view,
+        const render::Mat4& proj,const render::Vec3& eye,const std::vector<render::DrawItem>& items,const render::DrawOptions& main);
+    void add_native_frame_items(std::vector<render::DrawItem>& items,const render::Mat4& view,
+        const render::Frustum& fr,std::shared_ptr<render::NativeTexture> buffer);
     // The frame's items, after the scenery: the alpha clear, the slot 13 mask and the composite of
     // `buffer` (a camera-space quad just past the near plane; `fovy` vertical, `aspect` w / h).
     void add_frame_items(std::vector<render::DrawItem>& items, const render::Mat4& view, float fovy, float aspect,

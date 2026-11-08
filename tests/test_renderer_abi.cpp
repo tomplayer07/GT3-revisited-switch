@@ -11,6 +11,16 @@ TEST(renderer_abi_rejects_client_platform_and_layout_mismatches) {
     CHECK(!verify_renderer_abi(wrong));
     wrong=valid; wrong.view+=8;
     CHECK(!verify_renderer_abi(wrong));
+    wrong=valid; wrong.draw_item+=8;
+    CHECK(!verify_renderer_abi(wrong));
+    wrong=valid; wrong.draw_options+=8;
+    CHECK(!verify_renderer_abi(wrong));
     wrong=valid; wrong.texture_info+=8;
     CHECK(!verify_renderer_abi(wrong));
+}
+
+TEST(renderer_abi_rejects_old_layout_even_when_all_sizes_match) {
+    auto stale=gt3r::render::local_renderer_abi();
+    stale.features&=0xffffu;
+    CHECK(!gt3r::render::verify_renderer_abi(stale));
 }

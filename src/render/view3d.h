@@ -31,6 +31,7 @@ namespace gt3r::render {
 enum class WireMode : u8 { Off, Overlay, Only };
 
 struct DrawOptions {
+    ProfilePass profile_pass=ProfilePass::Other;
     WireMode wire = WireMode::Off;
     int lod = 0;                       // draw only meshes of this LOD; -1 = all
     std::optional<CullMode> cull;      // override per-primitive culling (debugging decoders)
@@ -69,6 +70,7 @@ struct DrawOptions {
     // Environment cube for the car reflection passes (View3D::render_env_cube); null = the
     // gradient above. Sampled with the world-space reflection vector.
     SDL_GPUTexture* env_cube = nullptr;
+    std::shared_ptr<NativeCubeTexture> native_env_cube;
     // Look the cube up the way GT3 reads its view-dependent sphere map: the angle from the
     // toward-viewer direction compressed (theta' = 2 asin(0.9 sin(theta / 2))) and the result
     // tilted 15 degrees up about the camera's x axis.
@@ -81,6 +83,7 @@ struct DrawOptions {
     // up with the reflection kernel s = 0.5 + 0.5 Rx / m, t = 0.5 - 0.5 Ry / m,
     // m = |R + (0, 0, 1)|, R the reflected view vector in view space.
     SDL_GPUTexture* env_sphere = nullptr;
+    std::shared_ptr<NativeTexture> native_env_sphere;
     // Store every fragment at 5 bits per channel (c8 >> 3 << 3): GT3's reflection map is a
     // PSMCT16 frame buffer. Set when rendering that map into the cube, so lookups filter
     // between quantised texels as the GS does, instead of quantising the filtered colour
@@ -297,6 +300,7 @@ struct DrawItem {
     // Samples this texture (bilinear, clamped) instead of the primitives' own, e.g. an
     // offscreen buffer from View3D::render_offscreen.
     SDL_GPUTexture* texture = nullptr;
+    std::shared_ptr<NativeTexture> native_texture;
     // With texture: filtered as the GS does it (bilinear with 4-bit weights, each lerp truncated
     // to a whole 8-bit level), for a buffer that holds whole levels: GT3's wet-road blur copies
     // and composite (race/wet_road.h).
@@ -338,6 +342,7 @@ struct DrawItem {
     // geometry: GpuModel's keep_geometry), the vertex colour linear in screen space as the GS
     // interpolates it. The triangles are taken in strip order: their indices ascending (gtm1).
     bool guard_band = false;
+    ProfileRole profile_role=ProfileRole::Scene;
 };
 
 class View3D {
@@ -366,6 +371,15 @@ public:
     SDL_GPUTexture* render_env_cube(const Vec3& pos, const std::vector<DrawItem>& items, const DrawOptions& options,
                                     int size = 128, unsigned faces = 0x3F);
     SDL_GPUTexture* env_cube() const { return cube_; }
+    std::shared_ptr<NativeCubeTexture> native_env_cube() const { return native_cube_; }
+    // Native resources are separate typed handles, never SDL_GPU pointer casts.
+    std::shared_ptr<NativeTexture> render_native_offscreen(int slot,int w,int h,const Mat4& view,const Mat4& proj,
+        const Vec3& eye,const std::vector<DrawItem>& items,const DrawOptions& options);
+    std::shared_ptr<NativeCubeTexture> render_native_env_cube(const Vec3& pos,const std::vector<DrawItem>& items,
+        const DrawOptions& options,int size=128,unsigned faces=0x3f);
+    std::shared_ptr<NativeTexture> native_env_face(unsigned face) const {
+        return face<6 ? native_cube_faces_[face] : nullptr;
+    }
 
     // Renders `items` into offscreen buffer `slot` (0..3; `w` x `h`, cleared to `options.clear`,
     // own depth) and returns it for sampling (DrawItem::texture); null on failure.
@@ -384,6 +398,12 @@ public:
 
 private:
     std::unique_ptr<NativeView> native_;
+    std::array<std::unique_ptr<NativeView>,4> native_offscreen_;
+    std::unique_ptr<NativeView> native_post_;
+    std::array<std::unique_ptr<NativeView>,6> native_cube_views_;
+    std::array<std::shared_ptr<NativeTexture>,6> native_cube_faces_;
+    std::shared_ptr<NativeCubeTexture> native_cube_;
+    int native_cube_size_=0;
     bool frame_alpha_written_ = false; // a DrawItem::frame_alpha pass wrote the target alpha this draw
     void capture_frame(SDL_GPUCommandBuffer* cmd);
     void write_capture();

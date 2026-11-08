@@ -25,9 +25,19 @@ struct ModelMeshInfo {
 };
 
 
+// Vertex values/transforms may change without rebuilding index/material storage.
+bool same_model_geometry_layout(const std::vector<scene::Mesh>& a,const std::vector<scene::Mesh>& b);
+
+// Native backend owns the packed buffers. Refresh public unmerged metadata
+// without packing/copying vertices or indices, reusing existing metadata storage.
+// Matches assemble_model_geometry(..., lines=false, merge=false, bounds=false).
+size_t describe_model_geometry(const std::vector<scene::Mesh>& meshes,size_t texture_count,
+    std::vector<ModelMeshInfo>& out);
+
 // Shared CPU preparation; local indices are relative to each mesh's vertex_offset.
 // Set merge=false to preserve primitive packet order, e.g. native car passes.
+// primitive_bounds=false omits only packet spheres; mesh bounds and draws remain.
 void assemble_model_geometry(const std::vector<scene::Mesh>& meshes, size_t texture_count, bool lines,
     std::vector<scene::Vertex>& vertices, std::vector<u32>& indices,
-    std::vector<ModelMeshInfo>& out, bool merge = true);
+    std::vector<ModelMeshInfo>& out, bool merge = true, bool primitive_bounds = true);
 } // namespace gt3r::render

@@ -40,6 +40,7 @@ bool RaceScreen::update_env_cube() {
     }
     render::DrawOptions o = draw_options();
     o.env_cube = nullptr;
+    o.profile_pass=render::ProfilePass::Environment;
     o.draw_distance = 200;
     o.far_clip = 0;
     o.frustum_cull = true;
@@ -48,6 +49,10 @@ bool RaceScreen::update_env_cube() {
         o.fog = false;
         o.quantize_rgb5 = true;
         for (int i = 0; i < 3; ++i) o.clear[i] = 0;
+    }
+    if(app_ && app_->gpu()->native_renderer()) {
+        const unsigned mask=native_env_faces_==1 && view_->native_env_cube() ? 1u<<(native_env_face_++%6) : 0x3f;
+        return bool(view_->render_native_env_cube(pos,env_items_,o,64,mask));
     }
 #if defined(__SWITCH__)
     SDL_FlushRenderer(app_->renderer());
@@ -90,6 +95,7 @@ void RaceScreen::draw_mirror(App& app, Ui& ui, const SDL_FRect& frame, const ren
     sv.far_m = 120;
     collect_items(eye, cam_right(cam), p2, !p2, sv, ItemsView::Mirror); // the own car would fill the view
     render::DrawOptions o = main;
+    o.profile_pass=render::ProfilePass::Mirror;
     o.mirrored = true;
     o.draw_distance = 120;
     o.far_clip = 0; // (its projection's own far plane: GT3's 120 m)
@@ -189,6 +195,7 @@ int RaceScreen::car_lamp_index(const sim::VehicleState& s, size_t slot) const {
 // weakened by the car's dirt (the player's garage car; others are clean).
 CarLook RaceScreen::car_look(const sim::VehicleState& s, bool player, size_t slot) const {
     CarLook look;
+    look.draw_shadows=!deko_test_no_car_shadows_;
     const SunParams& e = sun_.params();
     const track::Track* rt = track_ ? track_->runtime() : nullptr;
     if (rt && e.has_env && point_lights_.active()) {
@@ -613,13 +620,14 @@ sim::Vec3 RaceScreen::cam_forward(const CameraRig& c) {
 render::DrawOptions RaceScreen::draw_options() const {
     const float* hz = course_scene_->horizon_color();
     render::DrawOptions o;
+    o.profile_pass=render::ProfilePass::Main;
     o.frustum_cull = true;
     o.sort_blended = true;
     // GT3's far plane (Env0 +0x20; CameraRig::gt3_far) is the race view's only draw distance.
     o.far_clip = camera_.gt3_far;
     o.draw_distance = o.far_clip > 0 ? 0 : 2500;
 #if defined(__SWITCH__)
-    o.draw_distance = 650;
+    if(!app_ || !app_->gpu() || !app_->gpu()->native_renderer()) o.draw_distance=650;
 #endif
     o.fog = true;
     o.fog_start = 350;
@@ -656,7 +664,9 @@ render::DrawOptions RaceScreen::draw_options() const {
     // (From a car, scenery fills the horizon band; the sky shows only above it.)
     for (int i = 0; i < 3; ++i) o.env_sky[i] = sky[i], o.env_horizon[i] = ground[i], o.env_ground[i] = ground[i];
     o.reflection_fresnel = 0.8f;
-    if (env_cube_on_ && view_) o.env_cube = view_->env_cube();
+    if (env_cube_on_ && view_) {
+        o.env_cube=view_->env_cube(); o.native_env_cube=view_->native_env_cube();
+    }
     o.env_gt3_lookup = env_gt3_scene_;
     o.reflection_strength = 1.0f;
     return o;
@@ -713,10 +723,38 @@ void RaceScreen::add_screen_passes(render::DrawOptions& o, const SDL_FRect& rect
 
 void RaceScreen::render_drive(App& app, Ui& ui) {
     app.note_race_scale();
+    auto* profiler=app.gpu() ? app.gpu()->native_renderer() : nullptr;
+    const bool live_profile=profiler && !quick_ && !paused_ && !replaying_ && !demo_ && !preview_ && !finished_ && race_time_>=0;
+    if(live_profile) profiler->profile_race_frame({render_state_.position.x,render_state_.position.z,float(render_state_.speed_kmh),exact_field() ? exact_field()->opponents() : 0,deko_test_no_car_shadows_});
+    struct CpuProfileEnd {
+        render::NativeRenderer* backend; Uint64 start;
+        double animations=0,wet=0,palettes=0,moving=0,textures=0,geometry=0,metadata=0; Uint64 tailStart=0;
+        ~CpuProfileEnd() {
+            if(backend) {
+                const auto now=SDL_GetTicksNS();
+                backend->profile_race_cpu({double(now-start)/1e6,hitch::ticks_ms,hitch::env_ms,hitch::collect_ms,hitch::draw_ms,hitch::lamps_ms,
+                    animations,wet,tailStart ? double(now-tailStart)/1e6 : 0,palettes,moving,textures,geometry,metadata});
+            }
+        }
+    } cpu_profile{live_profile ? profiler : nullptr,SDL_GetTicksNS()};
     {
+        // Existing scopes distinguish palette recolouring, moving-node emission,
+        // backend copies and generic metadata. Enable only around this work.
+        struct ProfileEnable {
+            bool previous=render_profile::enabled;
+            ~ProfileEnable() { render_profile::enabled=previous; }
+        } enabled;
+        render_profile::enabled=enabled.previous || live_profile;
+        const auto before=render_profile::frame;
         render_profile::Scope measure(render_profile::frame.animations);
         upload_course_animations(); // once per frame
+        cpu_profile.palettes=render_profile::frame.palettes-before.palettes;
+        cpu_profile.moving=render_profile::frame.moving-before.moving;
+        cpu_profile.textures=render_profile::frame.textures-before.textures;
+        cpu_profile.geometry=render_profile::frame.geometry-before.geometry;
+        cpu_profile.metadata=render_profile::frame.assemble-before.assemble;
     }
+    cpu_profile.animations=double(SDL_GetTicksNS()-cpu_profile.start)/1e6;
     // The game area (App::aspect): 640 x 360 at 16:9, 480 x 360 at 4:3 (GT3's 4:3 picture),
     // the window's shape with fill.
     const float W = ui.width(), H = ui.height();
@@ -792,14 +830,14 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     Uint64 t0 = SDL_GetPerformanceCounter();
 #if GT3R_XR
     if (vr_stereo(app, split)) { // both eyes; the HUD and menus below go onto the panel in front
-        if (update_env_cube()) o.env_cube = view_->env_cube(), o.env_gt3_lookup = env_gt3_scene_;
+        if (update_env_cube()) o.env_cube = view_->env_cube(), o.native_env_cube=view_->native_env_cube(), o.env_gt3_lookup = env_gt3_scene_;
         render_vr_eyes(app, ui, o);
         frame_rect_ = rect = {0, 0, W, H};
     } else
 #endif
     {
     Uint64 h_e0 = SDL_GetTicksNS();
-    if (update_env_cube()) o.env_cube = view_->env_cube(), o.env_gt3_lookup = env_gt3_scene_;
+    if (update_env_cube()) o.env_cube = view_->env_cube(), o.native_env_cube=view_->native_env_cube(), o.env_gt3_lookup = env_gt3_scene_;
     Uint64 h_e1 = SDL_GetTicksNS();
     hitch::env_ms = double(h_e1 - h_e0) / 1e6;
     render::Vec3 eye = camera_.eye();
@@ -819,7 +857,9 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     hidden_opponent_ = -1;
     Uint64 h_c1 = SDL_GetTicksNS();
     hitch::collect_ms = double(h_c1 - h_e1) / 1e6;
+    const Uint64 wet_start=SDL_GetTicksNS();
     const size_t wet_items = wet_.active() ? add_wet_road(eye, rect.w / rect.h, o) : 0;
+    cpu_profile.wet=double(SDL_GetTicksNS()-wet_start)/1e6;
     // This view's post-process passes (presentation §G16): the dissolve's frozen picture at
     // trunc(128 x^3) / 128, view mode 1's trail at trunc(128 a) / 128; every picture kept.
     render::DrawOptions ov = o;
@@ -859,7 +899,7 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
             draw_mirror(app, ui, rect2, o, true, true);
     }
     } // (the flat views)
-    if (preset_.gpusync) { // Diagnostic only: serializes CPU and GPU work.
+    if (preset_.gpusync && !app.gpu()->native_renderer()) { // Legacy renderer diagnostic; never call GL on the native device.
 #if defined(__SWITCH__)
         SDL_FlushRenderer(ui.renderer());
         glFinish();
@@ -872,6 +912,7 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     if (render_profile::enabled) render_profile::frame.scene += draw_ms;
     log_perf(false);
 
+    cpu_profile.tailStart=SDL_GetTicksNS();
     {
     render_profile::Scope measure(render_profile::frame.hud);
     if (logger_mode_) { // the Analyzer over the replay (or its graph over everything)
@@ -1039,10 +1080,15 @@ size_t RaceScreen::add_wet_road(const render::Vec3& eye, const render::Mat4& vie
                 add(opp_visuals_[size_t(i)].get(), interpolate(f->opponent_prev_state(i), f->opponent_state(i), step_.alpha()),
                     f->opponent_setup(i), 2 + size_t(i));
     wet_.add_buffer_items(wet_items_, view, eye, cars);
-    SDL_GPUTexture* t = wet_.render(*view_, view, proj, eye, wet_items_, o);
     // GT3 composites it after the scenery, before the cars and their shadows (presentation §K, §I7).
     std::vector<render::DrawItem> frame;
-    wet_.add_frame_items(frame, view, fr, t);
+    if(app_ && app_->gpu()->native_renderer()) {
+        auto texture=wet_.render_native(*view_,view,proj,eye,wet_items_,o);
+        wet_.add_native_frame_items(frame,view,fr,std::move(texture));
+    } else {
+        SDL_GPUTexture* texture=wet_.render(*view_,view,proj,eye,wet_items_,o);
+        wet_.add_frame_items(frame,view,fr,texture);
+    }
     items_.insert(items_.begin() + std::ptrdiff_t(scenery_items_), frame.begin(), frame.end());
     return frame.size();
 }

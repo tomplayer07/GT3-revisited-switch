@@ -19,10 +19,17 @@ bool PrizeView::load(ByteSpan prm_bytes, const std::string& name) {
         return false;
     }
     gpu_ = std::make_unique<GpuModel>(ctx_, model_); // once: the sphere map is applied on the GPU
+    if(!gpu_->valid()) {
+        LOG_WARN("Prize %s: GPU model unavailable: %s",name.c_str(),SDL_GetError());
+        gpu_.reset(); file_.reset(); return false;
+    }
     shadow_.reset();
     try {
         scene::Model sh = prm::load_prm_shadow(bytes_, name);
-        if (!sh.meshes.empty()) shadow_ = std::make_unique<GpuModel>(ctx_, sh);
+        if (!sh.meshes.empty()) {
+            shadow_ = std::make_unique<GpuModel>(ctx_, sh);
+            if(!shadow_->valid()) shadow_.reset();
+        }
     } catch (const std::exception&) {
     }
     restart();

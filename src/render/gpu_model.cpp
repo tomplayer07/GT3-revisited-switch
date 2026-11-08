@@ -170,7 +170,10 @@ bool GpuModel::update_vertices(const std::vector<scene::Vertex>& all) {
 }
 
 bool GpuModel::update_textures(const std::vector<TextureUpdate>& updates) {
-    if (ctx_->native_renderer()) return native_ && native_->update_textures(updates);
+    if (ctx_->native_renderer()) {
+        render_profile::Scope measure(render_profile::frame.textures);
+        return native_ && native_->update_textures(updates);
+    }
 #if defined(__SWITCH__)
     // Diagnostic isolation: keep the initial images, while CPU palette animation,
     // moving geometry, lighting and simulation continue. Not a quality preset.
@@ -247,10 +250,22 @@ GpuModel::GpuModel(GpuContext& ctx, const GpuModel& textures)
 
 bool GpuModel::update_geometry(const std::vector<scene::Mesh>& meshes) {
     if (ctx_->native_renderer()) {
-        if (!native_ || !native_->update_geometry(meshes)) return false;
+        {
+            render_profile::Scope measure(render_profile::frame.geometry);
+            if (!native_ || !native_->update_geometry(meshes)) return false;
+        }
         std::vector<scene::Vertex> vertices; std::vector<u32> indices;
         std::vector<MeshInfo> info;
-        assemble_model_geometry(meshes,textures().size(),false,vertices,indices,info,false);
+        {
+            render_profile::Scope measure(render_profile::frame.assemble);
+            // The native backend already owns packed geometry. Only retained
+            // CPU geometry requires another packed vertex/index representation.
+            if(!keep_) {
+                vertex_count_=describe_model_geometry(meshes,textures().size(),meshes_);
+                return true;
+            }
+            assemble_model_geometry(meshes,textures().size(),false,vertices,indices,info,false,false);
+        }
         vertex_count_=vertices.size(); meshes_=std::move(info);
         if (keep_) geometry_={std::move(vertices),std::move(indices)};
         return true;

@@ -169,8 +169,8 @@ public:
     // Changes the MSAA level (the nearest the GPU offers: a missing 2x is 4x, others round down);
     // drops cached pipelines.
     void set_msaa(int samples);
-    // Anisotropic filtering of mipmapped textures: 1 (off), 2, 4, 8 or 16 (1 when the GPU has
-    // none). set_anisotropy recreates the samplers.
+    // Anisotropic filtering: 1 (off), 2, 4, 8 or 16 (1 when unsupported). SDL_GPU recreates its
+    // samplers; a native backend updates its shared sampler descriptors.
     bool anisotropy_supported() const { return anisotropy_; }
     int anisotropy() const { return anisotropy_ ? aniso_level_ : 1; }
     void set_anisotropy(int level);

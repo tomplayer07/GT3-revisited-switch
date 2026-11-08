@@ -16,6 +16,7 @@ public:
     Graphics(const Graphics&) = delete;
     Graphics& operator=(const Graphics&) = delete;
     void init();
+    void init_native(); // no diagnostic scene assets
     void present();
     FramePhases frame_phases() const;
     bool toggle_overlay();
@@ -52,7 +53,7 @@ private:
     struct Impl;
     std::shared_ptr<Impl> impl_;
 };
-bool open_log();
+bool open_log(const char* path = nullptr);
 void trace(const char* stage);
 void close_log();
 }
