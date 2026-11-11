@@ -5,6 +5,7 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
+#include <algorithm>
 
 #include <cmath>
 #include <memory>
@@ -70,7 +71,13 @@ public:
     float width() const { return w_; }
     float height() const { return h_; }
     // The game's 4:3 picture (its menus, movies) in the middle of the layout, full height.
-    UiRect picture43() const { return {(w_ - h_ * 4 / 3) / 2, 0, h_ * 4 / 3, h_}; }
+    // Stretched ([video] menus = stretch, App::stretch_menus): as wide as the layout, up to 16:9.
+    UiRect picture43() const {
+        const float w = stretch_ ? std::min(w_, h_ * 16 / 9) : h_ * 4 / 3;
+        return {(w_ - w) / 2, 0, w, h_};
+    }
+    void set_stretch_picture(bool on) { stretch_ = on; }
+    bool stretch_picture() const { return stretch_; }
     const UiRect& safe() const { return safe_; }
     // Finger-sized targets (phones and tablets).
     bool touch() const { return touch_; }
@@ -135,6 +142,7 @@ private:
     float w_ = kWidth, h_ = kHeight;
     UiRect safe_{0, 0, kWidth, kHeight};
     bool touch_ = false;
+    bool stretch_ = false;
     bool pointer_on_ = false;
     float pointer_x_ = 0, pointer_y_ = 0;
 };
