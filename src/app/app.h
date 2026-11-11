@@ -105,6 +105,10 @@ public:
     // Always 16:9 in VR (the headset's virtual screen).
     platform::Aspect aspect() const;
     void set_aspect(platform::Aspect a);
+    // [video] menus = 4:3 | stretch (default 4:3): the game's 4:3
+    // menus and movies at their shape, or stretched across the game area (up to 16:9).
+    bool stretch_menus() const;
+    void set_stretch_menus(bool on);
     // [video] full_car_detail = on | off (default on, off on phones and tablets): every car with its
     // full-detail model and textures at any distance; off: GT3's simpler models in the distance
     // (race::car_lod). Read when a race starts.

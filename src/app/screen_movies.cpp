@@ -293,7 +293,9 @@ public:
 
     void render(App&, Ui& ui) override {
         ui.fill(0, 0, ui.width(), ui.height(), Color{0, 0, 0});
-        player_.draw(ui.renderer(), player_.fit_4_3(0, 0, ui.width(), ui.height()));
+        const UiRect pic = ui.menu_picture(); // [video] menus = stretch: across the game area
+        player_.draw(ui.renderer(), ui.stretch_picture() ? SDL_FRect{pic.x, pic.y, pic.w, pic.h}
+                                                         : player_.fit_4_3(0, 0, ui.width(), ui.height()));
     }
 
 private:

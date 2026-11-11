@@ -473,7 +473,7 @@ bool pointer_down(const SDL_Event& e, float& x, float& y) {
 }
 
 bool ui_to_menu(const Ui& ui, SDL_FPoint p, float& x, float& y) {
-    const UiRect pic = ui.picture43();
+    const UiRect pic = ui.menu_picture();
     if (p.x < pic.x || p.x >= pic.right() || p.y < 0 || p.y >= pic.h) return false;
     x = (p.x - pic.x) * 640.0f / pic.w;
     y = 448.0f - p.y * 448.0f / pic.h;

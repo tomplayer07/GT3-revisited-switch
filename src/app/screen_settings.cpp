@@ -540,9 +540,15 @@ private:
         if (!vr)
             choice("Aspect ratio",
                    "The shape of the game's picture. 4:3: like on a 4:3 TV. Fill screen: races use the whole "
-                   "screen; menus and movies stay 4:3.",
+                   "screen. Stretch menus controls the shape of menus and movies.",
                    {"16:9", "4:3", "Fill screen"}, int(app.aspect()),
                    [a](int i) { a->set_aspect(platform::Aspect(i)); });
+        // [video] menus: the game's 4:3 menus and movies stretched across a wider game area.
+        if (!vr)
+            toggle("Stretch menus",
+                   "Stretch the game's 4:3 menus and movies to fill the 16:9 picture; off: shown at 4:3 "
+                   "with bars at the sides.",
+                   app.stretch_menus(), [a](bool v) { a->set_stretch_menus(v); });
 
         // [video] gamma (App::set_gamma), and a row back to 1 while it is not.
         if (!vr) {

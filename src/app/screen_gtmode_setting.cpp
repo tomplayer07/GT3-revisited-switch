@@ -124,7 +124,7 @@ public:
             return;
         }
         draw_frame(app);
-        const UiRect pic = ui.picture43();
+        const UiRect pic = ui.menu_picture();
         const SDL_FRect dst{pic.x, pic.y, pic.w, pic.h};
         if (frame_) SDL_RenderTexture(app.renderer(), frame_, nullptr, &dst);
     }

@@ -217,7 +217,7 @@ void RaceScreen::online_pause_note(Ui& ui) {
 
 void RaceScreen::render_pause(Ui& ui) {
     const float W = ui.width(), H = ui.height();
-    const UiRect pic = ui.picture43();
+    const UiRect pic = ui.menu_picture();
     if (replay_opts_open_) {
         SDL_FRect dst = original_res_ ? frame_rect_ : SDL_FRect{pic.x, pic.y, pic.w, pic.h};
         menu_frame_ = dst;

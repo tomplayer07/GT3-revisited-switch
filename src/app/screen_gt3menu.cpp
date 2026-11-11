@@ -250,7 +250,7 @@ public:
         }
         draw_frame(app);
         // 4:3 picture in the middle of the game area.
-        const UiRect pic = ui.picture43();
+        const UiRect pic = ui.menu_picture();
         const SDL_FRect dst{pic.x, pic.y, pic.w, pic.h};
         if (frame_) SDL_RenderTexture(app.renderer(), frame_, nullptr, &dst);
         // Our main menu (settings, mods, online, ...), in the bar beside the title menu.
@@ -294,7 +294,7 @@ private:
     // the touch controls are up, so a finger reaches it.
     static UiRect gt3r_menu_button(App& app) {
         const Ui& ui = app.ui();
-        const UiRect pic = ui.picture43();
+        const UiRect pic = ui.menu_picture();
         constexpr float kMinBar = 60;
         float x0 = 0, y0 = 0; // the bar's left edge: the window's when the game area has no bar
         if (pic.x < kMinBar && SDL_RenderCoordinatesFromWindow(app.renderer(), 0, 0, &x0, &y0)) x0 = std::min(x0, 0.0f);

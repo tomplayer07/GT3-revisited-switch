@@ -644,6 +644,15 @@ void App::set_aspect(platform::Aspect a) {
     save_config();
 }
 
+bool App::stretch_menus() const {
+    return to_lower(config_.get("video", "menus").value_or("4:3")) == "stretch";
+}
+
+void App::set_stretch_menus(bool on) {
+    config_.set("video", "menus", on ? "stretch" : "4:3");
+    save_config();
+}
+
 bool App::full_car_detail() const {
     return to_lower(config_.get("video", "full_car_detail").value_or(platform::is_mobile() ? "off" : "on")) == "on";
 }
@@ -1111,7 +1120,10 @@ void App::layout_ui(bool adaptive, bool game) {
         const int w = game ? platform::game_width(aspect(), pw, ph) : Ui::kWidth, h = Ui::kHeight;
         if (cur_w != w || cur_h != h || cur_mode != SDL_LOGICAL_PRESENTATION_LETTERBOX)
             SDL_SetRenderLogicalPresentation(renderer_, w, h, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-        if (ui_) ui_->set_layout(float(w), float(h), {0, 0, float(w), float(h)}, touch_ui_);
+        if (ui_) {
+            ui_->set_layout(float(w), float(h), {0, 0, float(w), float(h)}, touch_ui_);
+            ui_->set_stretch_picture(game && stretch_menus());
+        }
         touch_.controls().set_game_area(float(w), float(h)); // before the screen asks for its safe area
         return;
     }
@@ -1140,6 +1152,7 @@ void App::layout_ui(bool adaptive, bool game) {
     x0 = std::clamp(x0, 0.0f, float(lw) / 4), y0 = std::clamp(y0, 0.0f, float(lh) / 4);
     x1 = std::clamp(x1, float(lw) * 3 / 4, float(lw)), y1 = std::clamp(y1, float(lh) * 3 / 4, float(lh));
     ui_->set_layout(float(lw), float(lh), {x0, y0, x1 - x0, y1 - y0}, touch_ui_);
+    ui_->set_stretch_picture(false);
 }
 
 void App::draw_phone_mask() {

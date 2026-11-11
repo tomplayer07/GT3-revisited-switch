@@ -758,7 +758,7 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     // The game area (App::aspect): 640 x 360 at 16:9, 480 x 360 at 4:3 (GT3's 4:3 picture),
     // the window's shape with fill.
     const float W = ui.width(), H = ui.height();
-    const UiRect pic = ui.picture43();
+    const UiRect pic = ui.menu_picture();
     const SDL_FRect menu_dst{pic.x, pic.y, pic.w, pic.h};
     hud_.set_screen({0, 0, W, H});
     if (quick_) {
@@ -822,7 +822,8 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     if (original_res_ && !split) {
         // The original's frame: 640x448 internal, 4:3, pillarboxed.
         ui.fill(0, 0, W, H, Color{0, 0, 0, 255});
-        rect = menu_dst;
+        const UiRect classic = ui.picture43();
+        rect = {classic.x, classic.y, classic.w, classic.h};
         o.fixed_width = 640, o.fixed_height = 448;
         o.nearest = original_nearest_;
     }

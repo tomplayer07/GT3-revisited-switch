@@ -5,6 +5,7 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
+#include <algorithm>
 
 #include <cmath>
 #include <memory>
@@ -69,8 +70,17 @@ public:
     void set_layout(float w, float h, UiRect safe, bool touch) { w_ = w, h_ = h, safe_ = safe, touch_ = touch; }
     float width() const { return w_; }
     float height() const { return h_; }
-    // The game's 4:3 picture (its menus, movies) in the middle of the layout, full height.
+    // The original 4:3 picture, also used by races in original-resolution mode.
+    // Its geometry stays independent of the menu stretch preference.
     UiRect picture43() const { return {(w_ - h_ * 4 / 3) / 2, 0, h_ * 4 / 3, h_}; }
+    // Menus and movies may stretch across the game area, up to 16:9.
+    UiRect menu_picture() const {
+        if (!stretch_) return picture43();
+        const float w = std::min(w_, h_ * 16 / 9);
+        return {(w_ - w) / 2, 0, w, h_};
+    }
+    void set_stretch_picture(bool on) { stretch_ = on; }
+    bool stretch_picture() const { return stretch_; }
     const UiRect& safe() const { return safe_; }
     // Finger-sized targets (phones and tablets).
     bool touch() const { return touch_; }
@@ -135,6 +145,7 @@ private:
     float w_ = kWidth, h_ = kHeight;
     UiRect safe_{0, 0, kWidth, kHeight};
     bool touch_ = false;
+    bool stretch_ = false;
     bool pointer_on_ = false;
     float pointer_x_ = 0, pointer_y_ = 0;
 };
